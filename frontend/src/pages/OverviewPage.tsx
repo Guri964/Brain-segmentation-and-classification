@@ -226,6 +226,12 @@ export default function OverviewPage() {
                   <li key={model.model_id}>
                     <span className="font-medium">{model.model_id}</span> —{" "}
                     {model.verdict.replace(/_/g, " ")}. {model.recommendation}
+                    {model.training ? (
+                      <span className="mt-0.5 block text-xs opacity-80">
+                        Training data: {model.training.label}
+                        {model.training.note ? ` — ${model.training.note}` : ""}
+                      </span>
+                    ) : null}
                   </li>
                 ))}
               </ul>

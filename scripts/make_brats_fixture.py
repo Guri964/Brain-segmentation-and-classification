@@ -4,6 +4,7 @@ import argparse
 import csv
 import sys
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 
@@ -20,7 +21,7 @@ NOTICE = (
 )
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=NOTICE)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--volumes", type=int, default=6)
@@ -32,7 +33,7 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=20240101)
     parser.add_argument("--grades", default="HGG,LGG", help="Grades assigned alternately to volumes")
     parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     import h5py
 

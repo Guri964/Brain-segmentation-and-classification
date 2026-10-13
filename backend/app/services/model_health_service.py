@@ -1,9 +1,12 @@
 from __future__ import annotations
 import logging
+from pathlib import Path
 from dataclasses import dataclass, field
 import numpy as np
 import torch
 from ..ml.registry import ModelRegistry
+from ..ml.training_provenance import describe as describe_provenance
+from ..ml.training_provenance import load_artifact_manifest
 from ..utils.io import utc_now
 logger = logging.getLogger(__name__)
 REFERENCE_PHANTOM_VERSION = "phantom-v1"
@@ -52,6 +55,7 @@ class HealthReport:
     recommendation: str = ""
     checked_at: str = utc_now()
     phantom_version: str = REFERENCE_PHANTOM_VERSION
+    training: dict = field(default_factory=dict)
     @property
     def responsive(self) -> bool:
         return self.verdict == "responsive"
@@ -70,12 +74,16 @@ class HealthReport:
             "checked_at": self.checked_at,
             "phantom_version": self.phantom_version,
             "responsive": self.responsive,
+            "training": self.training,
         }
 class ModelHealthService:
     def __init__(self, registry: ModelRegistry, config):
         self.registry = registry
         self.config = config
         self._cache: dict[str, HealthReport] = {}
+        # Read once: what the training run recorded about each checkpoint. Absent file means
+        # "no provenance recorded", never an assumption of good provenance.
+        self._provenance = load_artifact_manifest(getattr(config, "DATA_DIR", Path("data")))
     def check(self, model_id: str, *, force: bool = False) -> HealthReport:
         if model_id in self._cache and not force:
             return self._cache[model_id]
@@ -96,6 +104,7 @@ class ModelHealthService:
                     f"The model cannot be exercised until the checkpoint is available. "
                     f"Produce it with: {descriptor.trainer}"
                 ),
+                training=self._training_for(model_id),
             )
             self._cache[model_id] = report
             return report
@@ -178,9 +187,14 @@ class ModelHealthService:
             checks=checks,
             message=message,
             recommendation=recommendation,
+            training=self._training_for(model_id),
         )
         self._cache[model_id] = report
         return report
+
+    def _training_for(self, model_id: str) -> dict:
+        """What the training run recorded about this checkpoint (see training_provenance)."""
+        return describe_provenance(model_id, self._provenance, data_dir=getattr(self.config, "DATA_DIR", None))
     def _reference_inputs(self, spec) -> list[tuple[str, np.ndarray]]:
         if spec.channels == 4:
             phantom = brainai_reference_phantom_4ch(spec.height)

@@ -189,6 +189,65 @@ tree with the same layout so the five steps above can be rehearsed. It prints a 
 labels are made up and any metric from it is meaningless. Details: `docs/BRAFTS2020.md`,
 `docs/CLASSIFICATION.md`.
 
+### 5.2 Train on a free Kaggle T4 (the route this machine cannot take)
+
+BraTS 2020 is ~60 GB and needs a GPU, so the full training run does not fit here: this delivery
+machine has no GPU, 3 GB of RAM and 11 GB of disk, and `www.kaggle.com` is unreachable from it.
+Nothing about that is worked around with fake numbers -- instead the whole run is packaged as a
+notebook that you execute once on Kaggle.
+
+```bash
+# 0. the notebook is generated from its sources; regenerate it only if you edited them
+python notebooks/build_kaggle_notebook.py            # writes notebooks/brain_tumor_training_kaggle_t4.ipynb
+python notebooks/build_kaggle_notebook.py --check     # verifies the committed notebook is current
+python -m pytest tests/test_kaggle_notebook.py -q     # executes every cell against a synthetic fixture
+```
+
+Then, on Kaggle:
+
+1. Create a notebook and **File -> Import Notebook ->** `notebooks/brain_tumor_training_kaggle_t4.ipynb`.
+2. **Settings -> Accelerator -> GPU T4 x2** (any CUDA GPU works; cell 1 prints the device, the
+   memory and whether mixed precision is on before anything is trained).
+3. **Add Data -> Datasets ->** `awsaf49/brats2020-training-data`. Internet access is not needed:
+   the notebook reads the dataset from `/kaggle/input` and embeds the project's own code.
+4. Run all cells. Cell 2 (`RUN`) holds every size, epoch count and time budget; the training cells
+   checkpoint every 500 steps / 20 minutes and resume from `checkpoints/<model>/last.pt`, so a
+   session that ends mid-run continues in the next one instead of starting over.
+5. Download `brain_mri_artifacts.zip` from the notebook output panel.
+
+```bash
+# back on this machine: install the artefacts and tell the API about them
+unzip brain_mri_artifacts.zip
+python scripts/install_trained_artifacts.py --source brain_mri_artifacts --data-dir data
+# the script prints the environment variables (BRAIN_MODEL_SEGNET, BRAIN_MODEL_RAUNET,
+# BRAIN_MODEL_UNET, BRAIN_CLASSIFIER_DIR); export them before starting the API
+python scripts/check_models.py --force     # every checkpoint is loaded and exercised
+python -m pytest tests -q
+python backend/run.py
+```
+
+What the notebook writes (all inside `brain_mri_artifacts/`):
+
+| File | Content |
+| --- | --- |
+| `checkpoints/segnet_brats_4ch_real_brats.pt` | retrained SegNet, 4x256x256, logits |
+| `checkpoints/raunet_brats_4ch.pt` | RAUNet, 4x256x256, logits |
+| `checkpoints/unet_dynamic_512_real_brats.pt` | retrained U-Net, 1x512x512, probability |
+| `data/models/classification/<version>/` | classifier `.joblib` + `manifest.json` (ordered feature schema, scaler, label mapping, metrics, caveats) |
+| `data/models/evaluation_results.json` | Dice/IoU/precision/recall + HD95 with bootstrap intervals on the held-out test split |
+| `data/models/model_selection.json` | which checkpoint was chosen, on validation data only |
+| `data/models/ensemble_calibration.json` | fusion weights estimated on the validation split |
+| `data/models/artifacts_manifest.json` | provenance the API reads to label each model |
+| `reports/` | EDA, mask and Grad-CAM figures, comparison tables, confusion matrix |
+
+Two rules the notebook enforces and the code checks: the reserved test split is read exactly once
+(after selection, which uses validation data only), and nothing in the repository is overwritten --
+`install_trained_artifacts.py` writes new files next to the shipped ones and records the hashes.
+
+The classifier is trained on the feature schema the API computes at serving time
+(`analysis_service._run_radiomics()` extracts from the first display plane, i.e. T1, with bare
+feature names), so the exported artefact can be served without re-ordering or padding features.
+
 A smoke run of any script is available with `--dry-run`, and `--max-cases 2` caps the
 work for a quick check.
 

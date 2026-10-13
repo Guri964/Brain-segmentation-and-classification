@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 import numpy as np
+from ..ml.training_provenance import LABELS as TRAINING_LABELS
+from ..ml.training_provenance import SERVING_NOTES as TRAINING_NOTES
+from ..ml.training_provenance import state_from_flags
 from ..utils.io import read_json, utc_now
 logger = logging.getLogger(__name__)
 MANIFEST_NAME = "manifest.json"
@@ -29,6 +32,7 @@ class ClassificationOutcome:
     model_comparison: dict = field(default_factory=dict)
     caveats: list[str] = field(default_factory=list)
     evaluated_on: str | None = None
+    training: dict = field(default_factory=dict)
     def to_dict(self) -> dict:
         return {
             "available": self.available,
@@ -50,6 +54,7 @@ class ClassificationOutcome:
             "model_comparison": self.model_comparison,
             "caveats": self.caveats,
             "evaluated_on": self.evaluated_on,
+            "training": self.training,
         }
 class ClassificationService:
     def __init__(self, config, registry=None):
@@ -87,6 +92,49 @@ class ClassificationService:
         payload["_directory"] = str(manifest_path.parent)
         self._artefact = payload
         return payload
+    def training_provenance(self) -> dict:
+        """What the artefact records about the data it was trained on.
+
+        The classification branch has to be honest in the same way the segmentation models are:
+        an artefact fitted on a synthetic fixture is never presented as trained on real data, and
+        an artefact that does not say is reported as unverified rather than assumed good.
+        """
+        artefact = self.discover()
+        if not artefact:
+            return {
+                "state": "not_trained",
+                "label": TRAINING_LABELS["not_trained"],
+                "dataset": None,
+                "synthetic": None,
+                "evaluated_on": None,
+                "split_method": None,
+                "serving_note": "No classifier artefact is installed, so no prediction is produced.",
+            }
+        dataset = artefact.get("dataset") or {}
+        synthetic = dataset.get("synthetic")
+        metrics = artefact.get("metrics") or {}
+        evaluated_on = metrics.get("evaluation_split")
+        state = state_from_flags(
+            trained=True,
+            synthetic=synthetic if isinstance(synthetic, bool) else None,
+            evaluated_on=evaluated_on,
+        )
+        return {
+            "state": state,
+            "label": TRAINING_LABELS[state],
+            "dataset": dataset.get("name"),
+            "dataset_root": dataset.get("root"),
+            "synthetic": synthetic if isinstance(synthetic, bool) else None,
+            "provenance_note": dataset.get("provenance_note"),
+            "split_method": dataset.get("split_method") or (artefact.get("splits") or {}).get("method"),
+            "split_seed": dataset.get("split_seed") or artefact.get("seed"),
+            "evaluated_on": evaluated_on,
+            "feature_source": (artefact.get("feature_sources") or {}).get("mask_source"),
+            "trainer": artefact.get("trainer"),
+            "trained_at": artefact.get("trained_at"),
+            "serving_note": TRAINING_NOTES[state],
+        }
+
     def status(self) -> dict:
         directory = self.artifact_dir
         legacy_path = Path(self.config.MODEL_PATHS["radiomics_mlp_v1"])
@@ -135,6 +183,7 @@ class ClassificationService:
                 "imputation": (artefact.get("preprocessing") or {}).get("imputation"),
             },
             "caveats": artefact.get("caveats", []),
+            "training": self.training_provenance(),
             "trainer": artefact.get("trainer", "scripts/train_classification.py"),
             "calibration": artefact.get("calibration"),
             "target_description": artefact.get("target_description"),
@@ -245,6 +294,7 @@ class ClassificationService:
             model_comparison=artefact.get("model_comparison", {}),
             caveats=artefact.get("caveats", []),
             evaluated_on=(metrics or {}).get("evaluation_split"),
+            training=self.training_provenance(),
         )
     def _load_predictor(self, artefact: dict) -> tuple[Callable, dict]:
         directory = Path(artefact["_directory"])

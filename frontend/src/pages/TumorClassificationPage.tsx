@@ -156,8 +156,31 @@ export default function TumorClassificationPage() {
                       : NOT_AVAILABLE,
                   ],
                   ["Selected by", status?.selected_model ?? NOT_AVAILABLE],
+                  [
+                    "Training data",
+                    status?.training?.label ?? NOT_AVAILABLE,
+                  ],
+                  [
+                    "Evaluated on",
+                    status?.training?.evaluated_on ?? NOT_EVALUATED,
+                  ],
+                  [
+                    "Feature source",
+                    status?.training?.feature_source ?? NOT_AVAILABLE,
+                  ],
                 ]}
               />
+              {status?.available && status.training && status.training.state !== "trained_on_real_data" ? (
+                <InfoNote tone="warn">
+                  <p className="font-semibold">{status.training.label}</p>
+                  <p className="mt-1">{status.training.serving_note}</p>
+                  {status.training.provenance_note ? (
+                    <p className="mt-1 text-xs opacity-80">
+                      Provenance: {status.training.provenance_note}
+                    </p>
+                  ) : null}
+                </InfoNote>
+              ) : null}
               {!status?.available ? (
                 <InfoNote tone="warn">
                   <p className="font-semibold">Classification is switched off</p>

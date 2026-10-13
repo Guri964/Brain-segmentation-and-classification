@@ -24,6 +24,10 @@ BraTS HDF5/NIfTI  ->  prepare_brats.py       manifest with patient_id + grade
                           |
                           v
       ClassificationService -> /api/classification, /api/analysis/<id>, PDF section 6
+
+Same artefact, produced on a GPU with the real dataset:
+notebooks/brain_tumor_training_kaggle_t4.ipynb -> brain_mri_artifacts.zip
+                   -> scripts/install_trained_artifacts.py --source brain_mri_artifacts --data-dir data
 ```
 
 Commands (run end to end against the synthetic fixture in `scripts/make_brats_fixture.py`):
@@ -88,6 +92,16 @@ its caveats instead of implying precision it does not have.
 | `seed`, `trained_at`, `code_revision`, `environment`, `trainer` | Reproducibility record |
 | `caveats` | The statements the interface and the PDF are obliged to repeat |
 
+`ClassificationService` also reports *what the artefact was trained on*, read from the `dataset`
+block the training run writes (`training` in `/api/classification`, and in every analysis result):
+
+| `dataset.synthetic` | State | What the interface shows |
+| --- | --- | --- |
+| `false` | `trained_on_real_data` | Trained on the real dataset |
+| `true` | `trained_on_synthetic_fixture` | Trained on a synthetic fixture — predictions and recorded metrics describe that fixture only |
+| `null` / absent | `trained_on_unverified_dataset` | The training run could not establish the data, so the model is not presented as trained on real data |
+| no artefact | `not_trained` | No classifier is installed; no prediction is produced |
+
 `ClassificationService` serves an artefact **only** if it carries a feature schema, a label
 mapping and preprocessing statistics. Anything missing yields `available: false` with the reason
 and the missing items — never a quietly padded or re-ordered vector. A vector that is short of one
@@ -95,6 +109,28 @@ feature, or that carries unknown names, is refused and the missing names are lis
 `radiomics_cnn_model.pth` stays unused for exactly this reason: it expects 21 named features, no
 scaler or feature order was ever saved with it, and inventing the missing 10 would produce
 arbitrary numbers.
+
+### 3.1 The schema a served prediction needs
+
+`analysis_service._run_radiomics()` extracts features from `display_reference`, which is
+`preprocessed.display_stack[0][1]` — the **first** channel of a multi-channel upload, i.e. T1
+(`preprocessing_service.MODALITY_ORDER_BRATS = ("t1", "t1ce", "t2", "flair")`), on a single plane,
+with the mask the segmentation produced. Two consequences follow, and the Kaggle notebook obeys
+both:
+
+* feature names carry **no channel prefix** (`firstorder_mean`, not `ch3__firstorder_mean`), because
+  the API only ever computes one plane's features. A model trained on prefixed names could never be
+  fed;
+* non-numeric extractor output (`shape_units`, `diagnostics_dimensionality`, …) is **not** part of the
+  schema, and neither are the physical-unit features that are `None` without voxel spacing
+  (`shape_area_mm2`, …). A feature the API cannot compute is refused with `missing_features`, so a
+  schema must only contain values the extractor always produces.
+
+The notebook's tables therefore hold one row per patient (the slice with the largest tumour area),
+bare feature names, and a `mask_source` column distinguishing the BraTS reference mask from the
+segmentation model's predicted mask. Both tables are trained and compared on the same
+patient-level split, and the artefact records which one was selected. Section 16 of the notebook
+measures the drift between the two mask sources instead of assuming it is small.
 
 ## 4. Explainability
 
@@ -134,6 +170,12 @@ On the synthetic fixture (6 volumes, 24 slices, 12 manifest cases, 6 patients):
 | `POST /api/analysis` (PNG phantom) | request completed with `classification.available: true`, 25 contributions, `missing_features: []` |
 | PDF report | section 6 rendered with the metrics tables (118,418 bytes) |
 | Tests | 20 new tests in `tests/test_brats_pipeline.py` and `tests/test_classification_pipeline.py` |
+
+The same pipeline also runs end to end inside
+`notebooks/brain_tumor_training_kaggle_t4.ipynb`, and the test suite executes every one of its
+cells against the fixture (`tests/test_kaggle_notebook.py`), including the export that
+`ClassificationService` then loads. On the fixture the predictions are correctly refused when the
+segmentation model's predicted region is empty: no feature, no score.
 
 **None of those numbers is a result.** The fixture labels are invented and its masks are blobs, so
 every metric above describes the fixture. Real numbers require the real BraTS 2020 download (see

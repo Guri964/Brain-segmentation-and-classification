@@ -122,9 +122,59 @@ introduced.
 
 ## E. Models retrained
 
-None. Training requires the client dataset, which is not present on this machine; inventing
-results was not an option. Instead the full pipeline is committed and verified for syntax and
-contract:
+**None on this machine, on purpose.** The environment cannot train these models: 2 vCPU, 3 GB RAM,
+11 GB disk, no GPU, no BraTS data, and `www.kaggle.com` is unreachable from here (TLS reset). A
+60 GB dataset with 40-epoch GPU training is not a "try it and see" job, so instead of pretending,
+the complete run is packaged as an executable notebook (`notebooks/brain_tumor_training_kaggle_t4.ipynb`,
+28 code cells, generated from `notebooks/_notebook_source/` by `notebooks/build_kaggle_notebook.py`)
+that trains every model on a free Kaggle T4 and exports artefacts this repository installs with
+`scripts/install_trained_artifacts.py`.
+
+The notebook is not a sketch: the test suite executes all 28 of its code cells in order against the
+synthetic BraTS fixture and then opens the exported classifier with `ClassificationService` and the
+exported checkpoints with `ModelRegistry` (`tests/test_kaggle_notebook.py`, 9 tests, ~75 s on CPU).
+
+What it trains, and on what:
+
+| Model | Architecture | Input | Selection |
+| --- | --- | --- | --- |
+| `segnet_brats_4ch` | the application's `SegNet(in=4, out=1)` | 4x256x256, z-scored | validation Dice during training |
+| `unet_dynamic_512_real_brats` | the application's `DynamicUNet(DEFAULT_FILTERS)` | 1x512x512, [0, 1] | validation Dice during training |
+| `raunet_brats_4ch` | the application's `build_raunet` | 4x256x256, z-scored | validation Dice during training |
+| `radiomics_grade_classifier` | logistic regression vs histogram gradient boosting | 58-68 radiomics features per patient | validation macro-F1 |
+| `slice_classifier_image_based` (optional, GPU only) | small 2-D CNN, slice predictions pooled per patient | 4x256x256 | comparison only, not exported |
+
+Provenance and honesty rules the notebook enforces: patient-level splits frozen once and
+leak-checked; the reserved test split read exactly once, after selection; ensemble weights and
+checkpoint selection from the validation split only; the loss is the project's own `BCEDiceLoss`
+with `from_logits` taken from each architecture's `output_semantics`; the classification schema is
+the one the API computes at serving time (see `docs/CLASSIFICATION.md` §3.1); every export is
+re-loaded and re-scored before it is written, and the repository's shipped files are never touched.
+
+### E.1 What the interface is allowed to say about where a model came from
+
+A trained checkpoint that is shown as "trained on real BraTS data" when it was fitted on made-up
+images would be the same failure as a fabricated metric, so the claim is read from what the
+training run recorded (`backend/app/ml/training_provenance.py`) and never inferred from a file
+name:
+
+| Recorded | Reported to the user |
+| --- | --- |
+| `dataset.synthetic: false` + an evaluation on a held-out split | *Trained on the real dataset* |
+| `dataset.synthetic: true` | *Trained on a synthetic fixture* — and every number recorded with it is labelled as describing that fixture |
+| dataset present, no evaluation recorded | *Trained, not evaluated on a held-out split* (no metric is claimed) |
+| dataset provenance could not be established | *Trained on a dataset whose provenance was not established* — explicitly **not** presented as real data |
+| the run marked the model `not_trained` | *Not trained* |
+| no manifest at all (this repository, as shipped) | *No provenance recorded* — nothing is claimed |
+
+The notebook derives that flag from the data itself (the fixture writes
+`source='synthetic-fixture'` into its HDF5 files; a tree with fewer than 100 patient volumes and no
+marker is recorded as *unverified* rather than real, and the run can be told explicitly with
+`RUN["dataset_provenance"]`). The classification artefact carries the same block, so
+`GET /api/classification`, `/api/analysis/<id>` and `/api/models` all report it, and the dashboard
+shows it next to the model card and next to every checkpoint that needs attention.
+
+The script pipeline below remains the route for a local dataset:
 
 | Script | What it will do when the dataset is available |
 | --- | --- |
@@ -141,9 +191,9 @@ contract:
 | `scripts/extract_radiomics.py` | One labelled feature row per case using the application's own radiomics schema |
 | `scripts/train_classification.py` | Baseline vs improved grade classifier, train-only preprocessing, held-out metrics, servable artefact |
 
-Every one of those four was executed against a synthetic fixture (see "F.1"), which verifies the
-plumbing — argument handling, manifest structure, leakage check, artefact contract, API serving —
-and nothing about accuracy.
+Every one of those scripts was also executed against a synthetic fixture (see "F.1"), which
+verifies the plumbing — argument handling, manifest structure, leakage check, artefact contract,
+API serving — and nothing about accuracy.
 
 ## F. Dataset and label requirements
 
@@ -181,22 +231,23 @@ summary, because the fixture labels and masks are synthetic.
 
 | Item | Result |
 | --- | --- |
-| Test-split segmentation metrics | **Not evaluated** - no dataset on this machine; the interface shows "Not evaluated" and names `scripts/evaluate_models.py` |
-| Classification metrics | **Not evaluated**: no labelled dataset exists here. The pipeline is complete and was exercised on a synthetic fixture, whose numbers are not results. The shipped `radiomics_cnn_model.pth` stays disabled (11 of 21 features, no scaler, no feature order) |
+| Test-split segmentation metrics | **Not evaluated** - no dataset on this machine; the interface shows "Not evaluated" and names `scripts/evaluate_models.py`. The Kaggle notebook measures these on the real dataset and writes `evaluation_results.json` with bootstrap intervals |
+| Classification metrics | **Not evaluated**: no labelled dataset exists here. The pipeline is complete and was exercised on a synthetic fixture, whose numbers are not results. The shipped `radiomics_cnn_model.pth` stays disabled (11 of 21 features, no scaler, no feature order). The notebook trains the HGG-vs-LGG classifier on the real grade table and reports accuracy, per-class precision/recall/F1, macro-F1, weighted F1, confusion matrix and ROC-AUC on the held-out patient-level test split |
 | Reference-verification checks | Produced by `scripts/check_models.py`: `unet_dynamic_512` responsive, `segnet_brats_4ch` not responsive (all outputs at the background floor), `raunet_brats_4ch` missing, `radiomics_mlp_v1` incompatible |
 | Inference runtime (measured) | U-Net 0.28 s for the single slice above, 0.46-0.58 s per image across repeated runs on two CPU cores |
 | End-to-end analysis (measured) | 2.81 s for one slice: preprocess, segmentation, 68 radiomics features, Grad-CAM, five-pass TTA uncertainty, report (PDF, 618,715 bytes), database write |
 | Ensembling | Not available on this deployment: the two shipped checkpoints disagree on channels and on spatial size, so no fused probability map can exist. The interface says so instead of faking one |
 | Uncertainty (measured) | TTA over five passes: mean dispersion 0.0153, p95 0.0156, 3.99% of pixels in the high-uncertainty band |
 | BraTS/classification pipeline | Verified end to end on a synthetic fixture (F.1). No quality metric is claimed from it |
+| Kaggle notebook (executed here) | All 28 code cells run to completion against the fixture: cache, splits, three models with resumable checkpoints, two feature tables, four classifier candidates, validation-only ensemble calibration, one test-split evaluation with bootstrap intervals, Grad-CAM, export, compatibility checks. The numbers it produced are fixture numbers and are not quoted anywhere |
 
 ## H. Test results
 
 | Command | Result |
 | --- | --- |
-| `/home/user/.venv/bin/python -m pytest tests -q` | **78 passed** in 17.0 s (CPU only) |
+| `/home/user/.venv/bin/python -m pytest tests -q` | **106 passed** in 69 s (CPU only) |
 | `cd frontend && npx tsc --noEmit` | **0 errors** under `strict`, `noUnusedLocals`, `noUnusedParameters` |
-| `cd frontend && npm run build` | Success: 878.88 kB JavaScript (249.50 kB gzipped), 38.33 kB CSS |
+| `cd frontend && npm run build` | Success: 879.67 kB JavaScript (249.76 kB gzipped), 38.36 kB CSS |
 | `git status --porcelain` | clean after commit |
 
 Coverage: checkpoint loading and registry behaviour, preprocessing contracts (including the
@@ -205,8 +256,12 @@ radiomics with and without spacing, Grad-CAM and uncertainty gating, database mi
 repository API, report generation, every API route including error paths, assistant safety
 refusals, a frontend/backend contract test that checks every endpoint the interface calls exists
 in the Flask URL map, the BraTS slice reader/manifest builder/leakage check over a synthetic HDF5
-tree, and the classification helpers, trainer and served artefact (including the refusal of an
-incomplete feature vector).
+tree, the classification helpers, trainer and served artefact (including the refusal of an
+incomplete feature vector), the notebook (structure, freshness of the embedded sources, execution
+of every cell, and the exported artefacts opened by the real service classes), and the artefact
+installer (never overwriting shipped files, backing up before `--force`), and the training
+provenance rules (a fixture-trained model is never reported as trained on real data, and absent
+provenance is its own state rather than an assumption).
 
 ## I. Setup
 
@@ -215,11 +270,16 @@ python -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt          # add requirements-dev.txt for tests
 .venv/bin/python scripts/setup_env.py                      # environment report
 .venv/bin/python scripts/check_models.py                   # reference verification of the checkpoints
-.venv/bin/python -m pytest tests -q                        # 78 tests
+.venv/bin/python -m pytest tests -q                        # 106 tests
 
 cd frontend && npm install && npm run build && cd ..
 .venv/bin/python backend/run.py                            # http://127.0.0.1:5000
 ```
+
+Full training on the real dataset runs on Kaggle: see `HOW_TO_RUN.md` §5.2 (import
+`notebooks/brain_tumor_training_kaggle_t4.ipynb`, select a T4, attach
+`awsaf49/brats2020-training-data`, run all cells, then
+`python scripts/install_trained_artifacts.py --source brain_mri_artifacts --data-dir data`).
 
 GPU: install a CUDA build of torch for your driver (`pip install torch==2.4.1 --index-url
 https://download.pytorch.org/whl/cu121`) and set `DEVICE_PREFERENCE=cuda`; the platform detects
@@ -252,7 +312,10 @@ verified on CPU. Full details, environment variables and troubleshooting: `HOW_T
 11. The predicted class is the dataset's own annotation (for BraTS, the WHO grade group). It is
     not a malignancy verdict, a stage or a prognosis, and no surface in this repository describes
     it as one.
-12. Kaggle (the BraTS mirror) is unreachable from the delivery machine; the dataset path is
-    documented and scripted but was exercised only on the synthetic fixture.
+12. Kaggle (the BraTS mirror) is unreachable from the delivery machine and there is no GPU here,
+    so the real training run was not performed on this host: the dataset path is documented,
+    scripted, and packaged as `notebooks/brain_tumor_training_kaggle_t4.ipynb`, which the test
+    suite executes end to end on a synthetic fixture. Every real-data metric therefore has to come
+    from running that notebook; none is claimed here.
 13. This is a research prototype. Outputs are AI-generated and are not intended to replace
     professional medical diagnosis.

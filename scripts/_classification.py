@@ -31,6 +31,9 @@ IDENTIFIER_COLUMNS = {
     "radiomics_backend",
     "image_channel",
     "foreground_pixels",
+    "slice_index",
+    "roi_mask_dice",
+    "segmentation_model",
 }
 
 

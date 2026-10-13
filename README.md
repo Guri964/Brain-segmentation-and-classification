@@ -120,7 +120,11 @@ scripts/
   calibrate_ensemble.py     validation-only fusion weights
   extract_deep_features.py  encoder embeddings for the fusion experiment
   setup_env.py              environment report / installer
-tests/                      pytest suite (78 tests, CPU-only)
+  install_trained_artifacts.py  install the Kaggle export without overwriting shipped files
+notebooks/
+  brain_tumor_training_kaggle_t4.ipynb   the T4 notebook that trains and exports every model
+  build_kaggle_notebook.py               regenerates the notebook from notebooks/_notebook_source/
+tests/                      pytest suite (106 tests, CPU-only)
 docs/
 data/                       runtime storage (git-ignored)
 ```
@@ -164,7 +168,9 @@ data/                       runtime storage (git-ignored)
 | Ensemble | Not available in this deployment: the two loaded checkpoints take different inputs (4×256×256 vs 1×512×512) |
 | Radiomics | 68 features extracted from the predicted region on a 2-D slice (~0.2 s), pixel-domain units only (no pixel spacing in the test input) |
 | Runtime | 0.46–0.58 s per 512×512 single-channel image on 2 CPU cores, no GPU |
-| Test suite | 58 tests, all passing, CPU-only |
+| Test suite | 106 tests, all passing, CPU-only (includes executing every cell of the Kaggle notebook end to end on a synthetic fixture) |
+| Model training provenance | Reported per model from what the training run recorded: *trained on real data* / *trained on a synthetic fixture* / *trained, not evaluated* / *trained on an unverified dataset* / *no provenance recorded*. With no manifest installed, the shipped checkpoints are reported as **no provenance recorded** — never as trained on real data |
+| Kaggle T4 notebook | `notebooks/brain_tumor_training_kaggle_t4.ipynb` — trains SegNet / U-Net / RAUNet and the HGG-vs-LGG classifier on the real BraTS 2020 mirror, evaluates once on the reserved test split, and exports `brain_mri_artifacts/` for `scripts/install_trained_artifacts.py`. Its 28 code cells are executed by the test suite, so the structure is verified; the metrics it produces depend on the run and are written into the artefacts, not into this repository |
 
 Nothing in the table above is estimated or extrapolated. Where a number could not be
 measured, the table says so.

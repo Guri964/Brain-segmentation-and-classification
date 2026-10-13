@@ -27,6 +27,27 @@ export interface HealthCheckEntry {
   error?: string;
 }
 
+export interface TrainingProvenance {
+  state: string;
+  label: string;
+  dataset?: string | null;
+  dataset_root?: string | null;
+  synthetic?: boolean | null;
+  provenance_note?: string | null;
+  trained_on?: string | null;
+  evaluated_on?: string | null;
+  split_method?: string | null;
+  split_seed?: number | null;
+  feature_source?: string | null;
+  trainer?: string | null;
+  trained_at?: string | null;
+  produced_by?: string | null;
+  exported_file?: string | null;
+  best_validation_dice?: number | null;
+  serving_note: string;
+  note?: string | null;
+}
+
 export interface ModelHealth {
   model_id: string;
   status: string;
@@ -41,6 +62,7 @@ export interface ModelHealth {
   checked_at: string;
   phantom_version: string;
   responsive: boolean;
+  training?: TrainingProvenance;
 }
 
 export interface ModelInfo {
@@ -138,6 +160,7 @@ export interface ClassificationStatus {
   legacy_checkpoint_note?: string | null;
   required_artifacts?: string[];
   requirements?: string[];
+  training?: TrainingProvenance;
 }
 
 export interface ClassificationModelCard {
@@ -354,6 +377,7 @@ export interface ClassificationResult {
   >;
   caveats?: string[];
   evaluated_on?: string | null;
+  training?: TrainingProvenance;
 }
 
 export interface ExplainabilityEntry {
