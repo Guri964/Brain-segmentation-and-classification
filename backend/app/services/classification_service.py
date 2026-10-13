@@ -26,6 +26,9 @@ class ClassificationOutcome:
     missing_features: list[str] = field(default_factory=list)
     statement: str = ""
     target_description: str | None = None
+    model_comparison: dict = field(default_factory=dict)
+    caveats: list[str] = field(default_factory=list)
+    evaluated_on: str | None = None
     def to_dict(self) -> dict:
         return {
             "available": self.available,
@@ -44,6 +47,9 @@ class ClassificationOutcome:
             "missing_features": self.missing_features,
             "statement": self.statement,
             "target_description": self.target_description,
+            "model_comparison": self.model_comparison,
+            "caveats": self.caveats,
+            "evaluated_on": self.evaluated_on,
         }
 class ClassificationService:
     def __init__(self, config, registry=None):
@@ -62,15 +68,21 @@ class ClassificationService:
         if not directory.exists():
             self._artefact = None
             return None
-        manifests = sorted(directory.glob(f"*{MANIFEST_NAME}"))
+        manifests = sorted(directory.glob(f"*{MANIFEST_NAME}")) + sorted(directory.glob(f"*/*{MANIFEST_NAME}"))
         if not manifests:
             self._artefact = None
             return None
-        manifest_path = manifests[-1]
-        payload = read_json(manifest_path)
-        if not payload:
+        candidates = []
+        for path in manifests:
+            payload = read_json(path)
+            if not payload:
+                continue
+            stamp = str(payload.get("trained_at") or "")
+            candidates.append((stamp, path.stat().st_mtime, path, payload))
+        if not candidates:
             self._artefact = None
             return None
+        _, _, manifest_path, payload = max(candidates, key=lambda item: (item[0], item[1]))
         payload["_manifest_path"] = str(manifest_path)
         payload["_directory"] = str(manifest_path.parent)
         self._artefact = payload
@@ -104,14 +116,26 @@ class ClassificationService:
                 "legacy_checkpoint_note": legacy_note,
                 "requirements": self.data_requirements(),
             }
+        schema = list(artefact.get("feature_schema", []))
         return {
             "available": True,
             "model_id": artefact.get("model_id", "radiomics_classifier"),
             "model_version": artefact.get("version"),
             "trained_at": artefact.get("trained_at"),
             "label_mapping": artefact.get("label_mapping", {}),
-            "feature_count": len(artefact.get("feature_schema", [])),
+            "feature_count": len(schema),
+            "feature_schema": schema,
             "metrics": artefact.get("metrics", {}),
+            "model_comparison": artefact.get("model_comparison", {}),
+            "selected_model": artefact.get("selected_model"),
+            "splits": artefact.get("splits", {}),
+            "preprocessing": {
+                "type": (artefact.get("preprocessing") or {}).get("type"),
+                "fit_on": (artefact.get("preprocessing") or {}).get("fit_on"),
+                "imputation": (artefact.get("preprocessing") or {}).get("imputation"),
+            },
+            "caveats": artefact.get("caveats", []),
+            "trainer": artefact.get("trainer", "scripts/train_classification.py"),
             "calibration": artefact.get("calibration"),
             "target_description": artefact.get("target_description"),
             "legacy_checkpoint_note": legacy_note,
@@ -120,6 +144,7 @@ class ClassificationService:
     def data_requirements() -> list[str]:
         return [
             "Labelled radiomics table: one row per case with the feature columns and a class label column.",
+            "Produced by scripts/extract_radiomics.py, which writes the same feature schema the application computes.",
             "A defined label column with its meaning recorded (for example BraTS grade: HGG/LGG).",
             "Patient-level identifiers so the split can be made per patient rather than per slice.",
             "A held-out test split that is untouched during model selection, for the reported metrics.",
@@ -217,6 +242,9 @@ class ClassificationService:
                 "and it is not derived from the segmentation mask."
             ),
             target_description=artefact.get("target_description"),
+            model_comparison=artefact.get("model_comparison", {}),
+            caveats=artefact.get("caveats", []),
+            evaluated_on=(metrics or {}).get("evaluation_split"),
         )
     def _load_predictor(self, artefact: dict) -> tuple[Callable, dict]:
         directory = Path(artefact["_directory"])

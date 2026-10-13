@@ -88,6 +88,35 @@ export interface EnsembleCompatibility {
   reasons: string[];
 }
 
+export interface PerClassMetrics {
+  precision: number | null;
+  recall: number | null;
+  f1: number | null;
+  support: number;
+}
+
+export interface ClassificationMetrics {
+  accuracy?: number | null;
+  macro_f1?: number | null;
+  weighted_f1?: number | null;
+  roc_auc?: number | null;
+  roc_auc_average?: string | null;
+  precision_macro?: number | null;
+  recall_macro?: number | null;
+  samples?: number | null;
+  evaluated_model?: string | null;
+  evaluation_split?: string | null;
+  per_class?: Record<string, PerClassMetrics>;
+  confusion_matrix?: number[][];
+  confusion_matrix_order?: string[];
+  class_distribution?: Record<string, number>;
+  validation_accuracy?: number | null;
+  validation_macro_f1?: number | null;
+  validation_roc_auc?: number | null;
+  baseline_test_metrics?: ClassificationMetrics | null;
+  improved_test_metrics?: ClassificationMetrics | null;
+}
+
 export interface ClassificationStatus {
   available: boolean;
   reason?: string;
@@ -96,12 +125,60 @@ export interface ClassificationStatus {
   trained_at?: string;
   label_mapping?: Record<string, string>;
   feature_count?: number;
-  metrics?: Record<string, unknown>;
+  feature_schema?: string[];
+  metrics?: ClassificationMetrics;
+  model_comparison?: Record<string, { validation?: ClassificationMetrics | null; test?: ClassificationMetrics | null }>;
+  selected_model?: string | null;
+  splits?: Record<string, Record<string, number>>;
+  preprocessing?: { type?: string | null; fit_on?: string | null; imputation?: string | null };
+  caveats?: string[];
+  trainer?: string;
   calibration?: Record<string, unknown>;
   target_description?: string;
   legacy_checkpoint_note?: string | null;
   required_artifacts?: string[];
   requirements?: string[];
+}
+
+export interface ClassificationModelCard {
+  status: ClassificationStatus;
+  evaluation: {
+    state?: string;
+    reason?: string;
+    model_id?: string;
+    version?: string;
+    target?: string | null;
+    label_mapping?: Record<string, string>;
+    comparison?: Record<
+      string,
+      { validation?: ClassificationMetrics | null; test?: ClassificationMetrics | null }
+    >;
+    selected_model?: string;
+    splits?: Record<string, Record<string, number>>;
+    feature_count?: number;
+    baseline?: string;
+    improved?: string;
+    generated_at?: string;
+    produced_by?: string;
+    artefact?: string;
+  };
+  label_semantics: {
+    target: string | null;
+    explanation: string;
+    derived_from_mask: boolean;
+    note: string;
+  };
+  xai: {
+    method: string;
+    shap: { available: boolean; version?: string | null; reason?: string; fallback?: string };
+  };
+  training: {
+    recommended: string;
+    alternatives: string[];
+    pipeline: string[];
+    requirements: string[];
+  };
+  disclaimer: string;
 }
 
 export interface AssistantStatus {
@@ -271,6 +348,12 @@ export interface ClassificationResult {
   missing_features?: string[];
   statement?: string;
   target_description?: string | null;
+  model_comparison?: Record<
+    string,
+    { validation?: ClassificationMetrics | null; test?: ClassificationMetrics | null }
+  >;
+  caveats?: string[];
+  evaluated_on?: string | null;
 }
 
 export interface ExplainabilityEntry {

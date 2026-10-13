@@ -38,3 +38,27 @@ def test_assistant_history_is_recorded(client, brain_png):
     messages = history.get_json()["messages"]
     assert any(message["role"] == "user" for message in messages)
     assert any(message["role"] == "assistant" for message in messages)
+
+
+def test_assistant_answers_label_questions_and_still_refuses_clinical_ones(client, brain_png):
+    payload = _analysis(client, brain_png)
+    analysis_id = payload["analysis_id"]
+
+    label_question = client.post(
+        "/api/assistant/ask",
+        json={"analysis_id": analysis_id, "question": "Which grade group did the classifier predict?"},
+    )
+    assert label_question.status_code == 200
+    body = label_question.get_json()
+    assert body["topic"] == "classification"
+    # No classifier artefact is installed in the test deployment, so the answer must say so
+    # rather than produce a label.
+    assert "no class was predicted" in body["answer"]
+    assert "inventing a result" in body["answer"]
+
+    refusal = client.post(
+        "/api/assistant/ask",
+        json={"analysis_id": analysis_id, "question": "Is this tumour malignant, and what is the prognosis?"},
+    )
+    assert refusal.status_code == 200
+    assert refusal.get_json()["topic"] == "out_of_scope"

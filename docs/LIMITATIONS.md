@@ -103,7 +103,31 @@ synchronous analyses, and no user accounts. Analyses are addressed by identifier
 the schema contains no patient-identifying column, but there is no authentication
 layer: deploy this behind your own access control before it holds anything sensitive.
 
-## 14. Not a medical device
+## 14. The classification label is a dataset annotation
+
+The classifier predicts the label the dataset records — for BraTS that is the WHO grade group
+(`HGG` / `LGG`), a patient-level annotation in `name_mapping.csv`. It is not a malignancy
+verdict, not a clinical stage, not a prognosis and not a substitute for histopathology. The
+platform enforces this in the code, not only in the documentation: the mask never supplies the
+class, an unknown grade stays unlabelled instead of being coerced, and a label with no recorded
+meaning cannot be served. Two consequences worth stating plainly:
+
+* A model trained on one cohort's grade annotation learns that cohort's annotation practice,
+  including any label noise in it. High accuracy on such a table is not evidence of clinical
+  validity.
+* Class balance matters. BraTS 2020 is dominated by HGG cases, so a classifier can look strong
+  on accuracy while being uninformative on the minority class; the platform reports macro F1 and
+  the per-class table next to accuracy for exactly that reason.
+
+## 15. Models trained on synthetic fixtures are not models
+
+The BraTS pipeline, the radiomics feature table and the classifier were all executed against a
+synthetic fixture so that their plumbing could be verified without the dataset. Fixture labels
+are invented and fixture masks are blobs, so a fixture-trained artefact must never be installed
+in `data/models/classification/` for anything other than a demonstration, and no metric from it
+may be quoted. The artefact manifest records the source table, which makes that traceable.
+
+## 16. Not a medical device
 
 No part of this software has been reviewed, cleared or approved as a medical device.
 It is a research prototype. Outputs are AI-generated and are not intended to replace

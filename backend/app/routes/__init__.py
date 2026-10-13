@@ -2,6 +2,7 @@ from __future__ import annotations
 from flask import Flask
 from .analysis import analysis_bp
 from .assistant import assistant_bp
+from .classification import classification_bp
 from .evaluation import evaluation_bp
 from .health import health_bp
 from .history import history_bp
@@ -17,6 +18,7 @@ ALL_BLUEPRINTS = (
     history_bp,
     evaluation_bp,
     assistant_bp,
+    classification_bp,
 )
 def register_blueprints(app: Flask) -> None:
     for blueprint in ALL_BLUEPRINTS:

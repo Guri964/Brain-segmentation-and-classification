@@ -5,6 +5,7 @@ import NewAnalysisPage from "./pages/NewAnalysisPage";
 import SegmentationPage from "./pages/SegmentationPage";
 import ModelComparisonPage from "./pages/ModelComparisonPage";
 import RadiomicsPage from "./pages/RadiomicsPage";
+import TumourClassificationPage from "./pages/TumorClassificationPage";
 import ExplainabilityPage from "./pages/ExplainabilityPage";
 import ClinicalSupportPage from "./pages/ClinicalSupportPage";
 import HistoryPage from "./pages/HistoryPage";
@@ -22,6 +23,10 @@ export default function App() {
         <Route path="analysis/segmentation" element={<SegmentationPage />} />
         <Route path="models/compare" element={<ModelComparisonPage />} />
         <Route path="analysis/radiomics" element={<RadiomicsPage />} />
+        <Route
+          path="analysis/classification"
+          element={<TumourClassificationPage />}
+        />
         <Route
           path="analysis/explainability"
           element={<ExplainabilityPage />}

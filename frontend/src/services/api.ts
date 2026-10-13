@@ -5,6 +5,7 @@ import type {
   AssistantAnswer,
   AssistantStatus,
   Capabilities,
+  ClassificationModelCard,
   ClassificationStatus,
   CompareResponse,
   EvaluationResponse,
@@ -193,6 +194,8 @@ export const api = {
     request<Capabilities>("/api/capabilities").then(
       (capabilities) => capabilities.classification,
     ),
+  classificationModelCard: () =>
+    request<ClassificationModelCard>("/api/classification"),
 };
 
 function uploadWithProgress<T>(

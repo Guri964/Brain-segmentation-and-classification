@@ -65,8 +65,11 @@ class BaseConfig:
         "BRAIN_ENSEMBLE_CALIBRATION",
         str(BASE_DIR / "data" / "models" / "ensemble_calibration.json"),
     )
+    # Follows BRAIN_DATA_DIR so the directory the training scripts write into
+    # (resolve_data_dir()/models/classification) is the one the API reads.
     CLASSIFIER_ARTIFACT_DIR = os.environ.get(
-        "BRAIN_CLASSIFIER_DIR", str(BASE_DIR / "data" / "models" / "classification")
+        "BRAIN_CLASSIFIER_DIR",
+        str(Path(os.environ.get("BRAIN_DATA_DIR", BASE_DIR / "data")) / "models" / "classification"),
     )
     RADIOMICS_BACKEND = os.environ.get("BRAIN_RADIOMICS_BACKEND", "auto")
     RADIOMICS_BIN_COUNT = _env_int("BRAIN_RADIOMICS_BIN_COUNT", 32)

@@ -41,7 +41,7 @@ def main() -> int:
         labels = sorted({entry.get("label") for entry in entries if entry.get("label") is not None})
         strata[str(labels[0]) if labels else "unlabelled"].append(patient_id)
     splits: dict[str, list[str]] = {"train": [], "validation": [], "test": []}
-    for _, patient_ids in sorted(strata.items()):
+    for stratum, patient_ids in sorted(strata.items()):
         rng.shuffle(patient_ids)
         count = len(patient_ids)
         n_train = max(1, int(round(count * args.train))) if count >= 3 else count
@@ -50,7 +50,7 @@ def main() -> int:
             logger.warning(
                 "Stratum '%s' has only %d patient(s); it is placed in the training split. Metrics "
                 "from a test split this small would not mean anything.",
-                _,
+                stratum,
                 count,
             )
             n_train, n_val = count, 0

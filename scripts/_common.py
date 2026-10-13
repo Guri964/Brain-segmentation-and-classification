@@ -64,9 +64,13 @@ class Case:
     images: list[Path]
     mask: Path | None = None
     label: int | None = None
+    options: dict[str, Any] = field(default_factory=dict)
     @property
     def channels(self) -> int:
         return len(self.images)
+    @property
+    def source_kind(self) -> str:
+        return str(self.options.get("kind") or "image_files")
     def to_dict(self) -> dict[str, Any]:
         return {
             "case_id": self.case_id,
@@ -74,6 +78,7 @@ class Case:
             "images": [str(path) for path in self.images],
             "mask": str(self.mask) if self.mask else None,
             "label": self.label,
+            "options": self.options,
         }
 @dataclass
 class Dataset:
@@ -98,6 +103,11 @@ class Dataset:
             "with_labels": sum(1 for case in self.cases if case.label is not None),
             "split_sizes": {name: len(ids) for name, ids in self.splits.items()},
             "split_strategy": "patient_level",
+            "source_kinds": sorted({case.source_kind for case in self.cases}),
+            "channel_orders": sorted(
+                {",".join(case.options.get("channel_order") or []) for case in self.cases if case.options.get("channel_order")}
+            ),
+            "labelled": sum(1 for case in self.cases if case.label is not None),
             "warnings": self.warnings,
         }
 def load_manifest(path: Path, *, require_patient_ids: bool = True) -> Dataset:
@@ -127,14 +137,19 @@ def load_manifest(path: Path, *, require_patient_ids: bool = True) -> Dataset:
         mask = Path(mask_raw) if mask_raw else None
         if mask is not None and not mask.is_absolute():
             mask = root / mask
-        label = entry.get("label")
+        label = _coerce_label(entry.get("label"))
+        options = dict(entry.get("options") or {})
+        for key in ("mask_semantics", "mask_channel_labels", "channel_order", "spacing", "kind"):
+            if key in entry and key not in options:
+                options[key] = entry[key]
         cases.append(
             Case(
                 case_id=case_id,
                 patient_id=patient_id,
                 images=images,
                 mask=mask,
-                label=int(label) if label is not None and str(label) != "" else None,
+                label=label,
+                options=options,
             )
         )
     if not cases:
@@ -175,6 +190,14 @@ def load_manifest(path: Path, *, require_patient_ids: bool = True) -> Dataset:
         splits=splits,
         warnings=warnings,
     )
+def _coerce_label(value: Any) -> Any:
+    if value is None or str(value).strip() == "":
+        return None
+    text = str(value).strip()
+    try:
+        return int(float(text))
+    except ValueError:
+        return text
 def _assign_splits(cases: Sequence[Case], declared: dict[str, Iterable[str]] | None) -> dict[str, list[str]]:
     if declared:
         assigned: dict[str, list[str]] = {name: [str(item) for item in ids] for name, ids in declared.items()}
@@ -200,7 +223,8 @@ def save_checkpoint(path: Path, payload: dict[str, Any]) -> None:
 def write_run_record(directory: Path, record: dict[str, Any]) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = directory / f"{record.get('model_id', 'run')}-{stamp}.json"
+    name = record.get("run_id") or record.get("model_id") or "run"
+    path = directory / f"{name}-{stamp}.json"
     path.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
     return path
 def resolve_data_dir(explicit: str | None) -> Path:
@@ -260,6 +284,15 @@ def base_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--resume", type=Path, default=None, help="Checkpoint to resume from")
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
     parser.add_argument("--max-cases", type=int, default=None, help="Cap the number of cases (smoke runs)")
+    parser.add_argument(
+        "--lazy-loading",
+        action="store_true",
+        help=(
+            "Read each case from disk per batch instead of holding the whole split in memory. "
+            "Use this for BraTS-scale datasets; it also caps the validation pass with --val-cases."
+        ),
+    )
+    parser.add_argument("--val-cases", type=int, default=64, help="Cases used per validation pass in lazy mode")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--dry-run", action="store_true", help="Validate data and configuration, then stop")
     parser.add_argument("--verbose", action="store_true")

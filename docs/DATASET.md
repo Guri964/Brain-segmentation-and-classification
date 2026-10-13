@@ -129,17 +129,32 @@ The rules it enforces:
 
 ### How a labelled radiomics table is built
 
+Fastest route for a BraTS-style tree (see `docs/BRAFTS2020.md`):
+
+```bash
+python scripts/prepare_brats.py --root data/brats --out data/manifests/brats2020.json \
+  --grade-table data/brats/name_mapping.csv --splits
+python scripts/extract_radiomics.py --data data/manifests/brats2020.json \
+  --out data/manifests/brats_features.csv
+python scripts/train_classification.py --features data/manifests/brats_features.csv \
+  --split-column split --model-id radiomics_grade_classifier
+```
+
+By hand, for any other dataset:
+
 1. Run analyses for every labelled case (the same slice-selection rule for all of
    them), export the feature tables, and concatenate them on `case_id`.
-2. Add `label` and `patient_id` columns.
-3. Train with `scripts/train_classifier.py --features table.csv --label-column label
-   --patient-column patient_id`.
+2. Add `label`, `patient_id` and (optionally) `split` columns.
+3. Train with `scripts/train_classification.py --features table.csv --label-column label
+   --patient-column patient_id`, or `scripts/train_classifier.py` for the torch feature head.
 
-The script writes the ordered feature schema, the standardisation parameters fitted on
-the training split only, the label mapping and the held-out metrics into
-`data/models/classification/manifest.json`. The API activates the classification
-branch only when that file exists, and it refuses to run the model when a feature
-listed in the schema is missing from the request.
+`train_classification.py` writes a servable artefact under
+`data/models/classification/<model_id>-<stamp>/`: the ordered feature schema, the
+imputation and standardisation statistics fitted on the training split only, the label
+mapping, the held-out metrics for both the baseline and the improved model, and the
+caveats. The API activates the classification branch only when such an artefact exists,
+and it refuses to run the model when a feature listed in the schema is missing from the
+request instead of padding the vector. Artefact contract: `docs/CLASSIFICATION.md`.
 
 ---
 

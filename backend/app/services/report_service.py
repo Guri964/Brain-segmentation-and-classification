@@ -302,12 +302,62 @@ class ReportService:
             ["Calibrated", "yes" if classification.get("calibrated") else "no"],
         ]
         metrics = classification.get("metrics") or {}
-        for key in ("accuracy", "macro_f1", "roc_auc", "pr_auc"):
+        for key in ("accuracy", "macro_f1", "weighted_f1", "roc_auc", "pr_auc"):
             if metrics.get(key) is not None:
                 rows.append([key, _number(metrics[key])])
+        for key in ("evaluated_model", "evaluation_split", "samples", "precision_macro", "recall_macro"):
+            if metrics.get(key) is not None:
+                rows.append([key, str(metrics[key])])
         blocks.append(self._table(rows))
+        label_mapping = classification.get("label_mapping") or {}
+        per_class = metrics.get("per_class") or {}
+        if per_class:
+            blocks.append(Paragraph("Per-class metrics on the held-out split", self.styles["Body"]))
+            table = [["Class", "Precision", "Recall", "F1", "Support"]]
+            for index, entry in sorted(per_class.items()):
+                name = label_mapping.get(str(index), str(index))
+                table.append(
+                    [
+                        f"{name} ({index})",
+                        _number(entry.get("precision")),
+                        _number(entry.get("recall")),
+                        _number(entry.get("f1")),
+                        str(entry.get("support")),
+                    ]
+                )
+            blocks.append(self._table(table, small=True))
+        matrix = metrics.get("confusion_matrix") or []
+        order = metrics.get("confusion_matrix_order") or sorted(label_mapping)
+        if matrix:
+            blocks.append(Paragraph("Confusion matrix (rows: reference, columns: predicted)", self.styles["Body"]))
+            table = [["Reference \\ Predicted"] + [label_mapping.get(str(item), str(item)) for item in order]]
+            for row_index, row in enumerate(matrix):
+                label = label_mapping.get(str(order[row_index]), str(order[row_index]))
+                table.append([label] + [str(value) for value in row])
+            blocks.append(self._table(table, small=True))
+        comparison = classification.get("model_comparison") or {}
+        if len(comparison) > 1:
+            blocks.append(Paragraph("Baseline versus improved model", self.styles["Body"]))
+            table = [["Model", "Split", "Accuracy", "Macro-F1", "ROC-AUC"]]
+            for name, payload in comparison.items():
+                for split in ("validation", "test"):
+                    entry = (payload or {}).get(split) or {}
+                    if not entry:
+                        continue
+                    table.append(
+                        [
+                            name,
+                            split,
+                            _number(entry.get("accuracy")),
+                            _number(entry.get("macro_f1")),
+                            _number(entry.get("roc_auc")),
+                        ]
+                    )
+            blocks.append(self._table(table, small=True))
         if classification.get("statement"):
             blocks.append(Paragraph(classification["statement"], self.styles["Small"]))
+        for caveat in (classification.get("caveats") or [])[:4]:
+            blocks.append(Paragraph(caveat, self.styles["Small"]))
         contributions = classification.get("feature_contributions") or []
         if contributions:
             blocks.append(Paragraph("Per-case feature contributions", self.styles["Body"]))

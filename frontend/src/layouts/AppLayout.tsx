@@ -17,6 +17,7 @@ import {
   Sparkles,
   Stethoscope,
   Sun,
+  Microscope,
   Upload,
   X,
 } from "lucide-react";
@@ -34,6 +35,11 @@ const NAVIGATION = [
     to: "/analysis/radiomics",
     label: "Quantitative Radiomics",
     icon: FlaskConical,
+  },
+  {
+    to: "/analysis/classification",
+    label: "Tumour Classification",
+    icon: Microscope,
   },
   { to: "/analysis/explainability", label: "Explainable AI", icon: Sparkles },
   {

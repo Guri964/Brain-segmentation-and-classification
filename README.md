@@ -24,7 +24,9 @@ placeholder metrics and no fabricated predictions anywhere in this repository.
 | Grad-CAM explanations | Working for the single-channel U-Net | `backend/app/ml/gradcam.py`, `explainability_service.py` |
 | Feature attribution | Implemented; shown when a classifier artefact exists | `backend/app/services/classification_service.py` |
 | Uncertainty (TTA, MC dropout, ensemble disagreement) | Working (test-time augmentation) | `backend/app/services/uncertainty_service.py` |
-| Classification branch | Disabled until a validated artefact exists | `scripts/train_classifier.py` |
+| BraTS 2020 ingestion | Working: inspector, patient-level manifest builder, lazy HDF5/NIfTI loading | `scripts/inspect_brats.py`, `scripts/prepare_brats.py`, `scripts/_training.py` |
+| Radiomics feature table | Working: one labelled row per case in the application's own schema | `scripts/extract_radiomics.py` |
+| Tumour classification | Pipeline complete and served; **no artefact installed here**, so no class is predicted | `scripts/train_classification.py`, `backend/app/services/classification_service.py` |
 | SQLite persistence + history + search | Working | `backend/app/database/` |
 | PDF report (14 sections) | Working | `backend/app/services/report_service.py` |
 | Model evaluation module | Working; reports "Not evaluated" until the test split has been run | `backend/app/services/evaluation_service.py`, `scripts/evaluate_models.py` |
@@ -64,6 +66,8 @@ Full instructions, including GPU setup and dataset preparation, are in
 | [docs/API.md](docs/API.md) | Every endpoint with its request and response shape |
 | [docs/DATASET.md](docs/DATASET.md) | Manifest format, folder layouts, labelling requirements, splits |
 | [docs/ALGORITHM_NOVELTY.md](docs/ALGORITHM_NOVELTY.md) | Baseline, the modifications, and the experiments that would justify each claim |
+| [docs/BRAFTS2020.md](docs/BRAFTS2020.md) | BraTS 2020 layout, grade labels, inspection, manifest building, synthetic fixture |
+| [docs/CLASSIFICATION.md](docs/CLASSIFICATION.md) | Grade classifier: pipeline, splits, artefact contract, API, verified reproductions |
 | [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | What the platform cannot do, and why |
 | [docs/PROJECT_AUDIT.md](docs/PROJECT_AUDIT.md) | Audit of the original application (17 defects) |
 | [docs/CURRENT_ARCHITECTURE.md](docs/CURRENT_ARCHITECTURE.md) | As-found versus target architecture |
@@ -81,7 +85,7 @@ backend/
     config.py               environment-driven configuration
     errors.py               error hierarchy and handlers
     logging_config.py
-    routes/                 HTTP layer only (8 blueprints)
+    routes/                 HTTP layer only (9 blueprints, 33 routes)
     services/               all business logic
     ml/
       architectures/        SegNet, DynamicUNet, RAUNet
@@ -95,7 +99,7 @@ backend/
     utils/                  io, image and metric helpers
 frontend/
   src/
-    pages/                  11 dashboard pages
+    pages/                  13 dashboard pages
     components/             shared UI, charts, image viewer
     services/               API client and formatting
     hooks/                  analysis state
@@ -105,13 +109,18 @@ scripts/
   make_splits.py            patient-level train/validation/test split
   train_segnet.py           four-channel SegNet
   train_unet.py             single-channel U-Net / four-channel RAUNet
-  train_classifier.py       radiomics classifier artefact
+  train_classifier.py       torch feature-head classifier
+  train_classification.py   baseline-vs-improved sklearn classifier + servable artefact
+  inspect_brats.py          read-only BraTS tree inspection (layout, keys, masks, grades)
+  prepare_brats.py          BraTS -> patient-level manifest with leakage check
+  extract_radiomics.py      one labelled radiomics row per case
+  make_brats_fixture.py     synthetic fixture that mimics the Kaggle layout
   evaluate_models.py        reserved test split evaluation
   run_ablations.py          one-component-at-a-time ablations
   calibrate_ensemble.py     validation-only fusion weights
   extract_deep_features.py  encoder embeddings for the fusion experiment
   setup_env.py              environment report / installer
-tests/                      pytest suite (58 tests, CPU-only)
+tests/                      pytest suite (78 tests, CPU-only)
 docs/
 data/                       runtime storage (git-ignored)
 ```

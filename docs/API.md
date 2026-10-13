@@ -259,10 +259,82 @@ computes a metric from unlabelled predictions.
   "analysis_id": "an-20261013-e8ccde6b6e" }
 ```
 
-Questions about malignancy, grade, staging, prognosis, survival, biopsy or treatment
-are refused (`topic: "out_of_scope"`) before any backend runs. If a language-model
-backend is enabled it receives a reduced, non-identifying summary; its key is read
-from the environment and is never stored, logged or returned.
+Questions about malignancy, clinical grading, staging, prognosis, survival, biopsy or
+treatment are refused (`topic: "out_of_scope"`) before any backend runs. Questions about the
+stored dataset label ("which class did the classifier predict?") are answered from the stored
+classification record (`topic: "classification"`), and the answer states that the label is the
+dataset's own annotation and not a clinical diagnosis; when no validated artefact exists the
+answer says that no class was predicted instead of producing one. If a language-model backend is
+enabled it receives a reduced, non-identifying summary; its key is read from the environment and
+is never stored, logged or returned.
+
+---
+
+## Tumour classification
+
+### `GET /api/classification`
+
+```json
+{
+  "status": {
+    "available": true,
+    "model_id": "radiomics_grade_classifier",
+    "version": "radiomics_grade_classifier-20261013T091500",
+    "label_mapping": { "0": "HGG", "1": "LGG" },
+    "feature_count": 68,
+    "feature_schema": ["firstorder_mean", "…"],
+    "preprocessing": { "type": "standard_scaler", "fit_on": "training split only", "imputation": "training-split median" },
+    "metrics": { "accuracy": 0.0, "macro_f1": 0.0, "roc_auc": 0.0, "per_class": {}, "confusion_matrix": [], "evaluated_model": "…", "evaluation_split": "held-out test split", "samples": 0 },
+    "model_comparison": { "baseline_logistic_regression": { "validation": {}, "test": {} }, "improved_mlp": { "validation": {}, "test": {} } },
+    "splits": { "train": { "HGG": 0, "LGG": 0 } },
+    "caveats": ["…"],
+    "trainer": "scripts/train_classification.py"
+  },
+  "evaluation": { "state": "evaluated", "comparison": { "…": "…" } },
+  "label_semantics": {
+    "target": "BraTS 2020 HGG vs LGG (WHO grade group)",
+    "explanation": "The predicted class is the dataset label … not a malignancy verdict, not a clinical stage and not a prognosis",
+    "derived_from_mask": false,
+    "note": "The mask defines the region the features are measured in; the class comes from the label table."
+  },
+  "xai": { "method": "coefficient x standardised value, or single-feature substitution", "shap": { "available": false, "reason": "ModuleNotFoundError", "fallback": "…" } },
+  "training": { "recommended": "scripts/train_classification.py", "pipeline": ["…"], "requirements": ["…"] },
+  "disclaimer": "Research prototype. …"
+}
+```
+
+When no servable artefact exists, `status.available` is `false`, `status.reason` names the
+directory that was searched, `status.required_artifacts` lists what an artefact must contain, and
+`status.legacy_checkpoint_note` explains why the shipped `radiomics_cnn_model.pth` is not used
+(21 declared features, 11 available, no scaler, no feature order). The response never contains a
+placeholder label.
+
+Per-analysis results appear inside `GET /api/analysis/<analysis_id>`:
+
+```json
+{
+  "classification": {
+    "available": true,
+    "model_id": "radiomics_grade_classifier",
+    "predicted_label": "HGG",
+    "predicted_index": 0,
+    "scores": [0.61, 0.39],
+    "calibrated": false,
+    "metrics": { "accuracy": 0.0, "macro_f1": 0.0 },
+    "evaluated_on": "held-out test split",
+    "model_comparison": { "…": "…" },
+    "caveats": ["…"],
+    "feature_contributions": [
+      { "feature": "glcm_contrast", "value": 12.4, "weight": 0.08, "contribution": 0.42, "method": "linear coefficient x standardised value" }
+    ],
+    "missing_features": [],
+    "statement": "Predicted class according to the trained model …"
+  }
+}
+```
+
+An incomplete vector is refused with `available: false`, a `reason` and the `missing_features`
+list: the platform never pads, re-orders or drops features to force a prediction.
 
 ---
 

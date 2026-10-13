@@ -18,6 +18,7 @@ data/models/deep_features.csv
 data/models/evaluation_runs/
 data/models/training/
 data/models/*.json
+data/manifests/
 data/*.db
 data/*.db-journal
 backend/data/
@@ -26,6 +27,7 @@ logs/
 
 # Frontend
 node_modules/
+*.tsbuildinfo
 frontend/dist/
 frontend/node_modules/
 .vite/

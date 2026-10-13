@@ -159,6 +159,36 @@ python scripts/run_ablations.py --data data/manifest.json --models raunet_brats_
 python scripts/train_classifier.py --features radiomics.csv --label-column grade --patient-column patient_id
 ```
 
+### 5.1 BraTS 2020 end to end
+
+```bash
+# 1. look before you train (read-only; writes nothing into the dataset)
+python scripts/inspect_brats.py --root data/brats \
+  --grade-table data/brats/name_mapping.csv --json data/artifacts/brats_inspection.json
+
+# 2. build a patient-level manifest with the HGG/LGG labels and frozen splits
+python scripts/prepare_brats.py --root data/brats \
+  --out data/manifests/brats2020.json --grade-table data/brats/name_mapping.csv --splits
+
+# 3. train segmentation (lazy loading reads slices from disk on demand)
+python scripts/train_segnet.py --data data/manifests/brats2020.json \
+  --size 256 --epochs 60 --batch-size 8 --lazy-loading --model-id segnet_brats_4ch
+
+# 4. one labelled radiomics row per case, in the application's own schema
+python scripts/extract_radiomics.py --data data/manifests/brats2020.json \
+  --out data/manifests/brats_features.csv
+
+# 5. train and compare the grade classifier, then serve it
+python scripts/train_classification.py --features data/manifests/brats_features.csv \
+  --split-column split --model-id radiomics_grade_classifier \
+  --target-description "BraTS 2020 HGG vs LGG (WHO grade group)"
+```
+
+No BraTS data? `python scripts/make_brats_fixture.py --out /tmp/brats_fixture` writes a synthetic
+tree with the same layout so the five steps above can be rehearsed. It prints a warning: the
+labels are made up and any metric from it is meaningless. Details: `docs/BRAFTS2020.md`,
+`docs/CLASSIFICATION.md`.
+
 A smoke run of any script is available with `--dry-run`, and `--max-cases 2` caps the
 work for a quick check.
 
@@ -171,7 +201,7 @@ work for a quick check.
 | `Checkpoint not found` for every model | Run from the repository root, or set `BRAIN_MODEL_SEGNET` / `BRAIN_MODEL_UNET` to absolute paths |
 | `no_foreground` verdict for SegNet | Expected on this deployment. The checkpoint loads but predicts an empty mask; retrain with `scripts/train_segnet.py` |
 | Ensemble says "different inputs" | Correct behaviour. 4×256×256 and 1×512×512 models cannot be fused; train a partner with a matching input spec |
-| Classification disabled | No validated classifier artefact exists. See `scripts/train_classifier.py --help` for the required table |
+| Classification disabled | No validated classifier artefact exists. `GET /api/classification` names the directory it searched and what an artefact must contain; `scripts/train_classification.py` produces one from a labelled radiomics table |
 | "Every panel says Not available" | Open an analysis first (Overview → New MRI Analysis), or select one from History |
 | Upload rejected with `unsupported_input` | Only PNG/JPEG are accepted per file. NIfTI/NRRD/DICOM need SimpleITK and the corresponding pipeline |
 | Upload rejected as duplicate channels | Four-channel analyses need four *different* sequences; the API reports which ones matched |

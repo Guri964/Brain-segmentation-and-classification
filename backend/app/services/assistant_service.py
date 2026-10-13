@@ -18,8 +18,7 @@ REFUSAL_PATTERNS = (
     "chemo",
     "surgery",
     "stage",
-    "grade",
-    "grading",
+    "clinical grade",
     "histolog",
     "biopsy",
     "benign",
@@ -34,11 +33,11 @@ REFUSAL_PATTERNS = (
 )
 SAFETY_REPLY = (
     "I can only explain what this analysis produced; I cannot diagnose, predict prognosis, "
-    "grade a tumour or advise on treatment, and the models behind this analysis were not "
-    "trained for those questions. What the analysis does contain is a segmented region, "
-    "measurements of that region, radiomics features, an explanation map, and an honest "
-    "statement of what could not be computed. Ask me about any of those and I will quote the "
-    "actual values."
+    "assign a clinical grade or advise on treatment, and the models behind this analysis were "
+    "not trained for those questions. What the analysis does contain is a segmented region, "
+    "measurements of that region, radiomics features, an explanation map, a dataset-label "
+    "prediction when a validated classifier is installed, and an honest statement of what "
+    "could not be computed. Ask me about any of those and I will quote the actual values."
 )
 DISCLAIMER = (
     "This is a research prototype. Everything described here is AI-generated model output and "
@@ -347,16 +346,43 @@ class AssistantService:
                 sources=["classification.reason"],
             )
         metrics = classification.get("metrics") or {}
-        metric_text = ", ".join(
-            f"{key} {_fmt(value)}" for key, value in metrics.items() if isinstance(value, (int, float))
+        wanted = (
+            ("accuracy", "test accuracy"),
+            ("precision_macro", "test macro precision"),
+            ("recall_macro", "test macro recall"),
+            ("macro_f1", "test macro F1"),
+            ("roc_auc", "test ROC-AUC"),
+            ("samples", "test samples"),
         )
+        metric_text = ", ".join(
+            f"{label} {_fmt(metrics[key])}" for key, label in wanted if isinstance(metrics.get(key), (int, float))
+        )
+        comparison = classification.get("model_comparison") or {}
+        selected = (classification.get("metrics") or {}).get("evaluated_model")
+        comparison_text = ""
+        if comparison:
+            entries = []
+            for name, payload in comparison.items():
+                test = (payload or {}).get("test") or {}
+                if test.get("macro_f1") is None:
+                    continue
+                entries.append(f"{name} (test macro-F1 {_fmt(test['macro_f1'])})")
+            if entries:
+                comparison_text = (
+                    " Both models were scored on the same held-out split: "
+                    + "; ".join(entries)
+                    + f". The served one is {selected}."
+                )
+        evaluated_on = classification.get("evaluated_on")
         return AssistantAnswer(
             answer=(
                 f"The classifier ({classification.get('model_id')}) predicted class "
                 f"'{classification.get('predicted_label')}' from {len(classification.get('scores', []))} "
                 f"class scores. Calibrated: {'yes' if classification.get('calibrated') else 'no'}. "
                 + (f"Recorded held-out metrics: {metric_text}. " if metric_text else "")
-                + "This is a dataset-defined label, not a clinical diagnosis, and it is not derived "
+                + (f"They were measured on the {evaluated_on}. " if evaluated_on else "")
+                + comparison_text
+                + " This is a dataset-defined label, not a clinical diagnosis, and it is not derived "
                 "from the segmentation mask."
             ),
             topic="classification",

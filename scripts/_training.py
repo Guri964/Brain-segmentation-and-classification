@@ -54,6 +54,11 @@ class TrainingConfig:
             "architecture_kwargs": self.architecture_kwargs or {},
         }
 def load_case_arrays(case: Case, size: int, channels: int, *, log: logging.Logger | None = None) -> tuple[np.ndarray, np.ndarray | None]:
+    kind = case.source_kind
+    if kind == "brats_hdf5_slice":
+        return _load_brats_slice(case, size, channels, log=log)
+    if kind == "brats_nifti_volume":
+        return _load_brats_volume(case, size, channels, log=log)
     from app.utils.images import decode_image_bytes, resize_array
     planes = []
     for path in case.images[:channels]:
@@ -83,6 +88,67 @@ def load_case_arrays(case: Case, size: int, channels: int, *, log: logging.Logge
     if log is not None and mask is None:
         log.warning("Case %s has no mask; it will be skipped.", case.case_id)
     return image, mask
+
+
+def _load_brats_slice(case: Case, size: int, channels: int, *, log: logging.Logger | None = None) -> tuple[np.ndarray, np.ndarray | None]:
+    from app.utils.images import resize_array
+    from brats import read_slice_file
+    source = case.images[0]
+    stored = read_slice_file(source, mask_channel_labels=case.options.get("mask_channel_labels"))
+    image = stored.image
+    if channels and channels != image.shape[0]:
+        if channels < image.shape[0]:
+            image = image[:channels]
+        else:
+            padded = np.zeros((channels, image.shape[1], image.shape[2]), dtype=image.dtype)
+            padded[: image.shape[0]] = image
+            image = padded
+            if log is not None:
+                log.warning(
+                    "Case %s stores %d channel(s) but %d were requested; the missing channels are "
+                    "zero-filled rather than duplicated.",
+                    case.case_id,
+                    stored.image.shape[0],
+                    channels,
+                )
+    planes = [resize_array(plane, (size, size)) for plane in image]
+    stacked = np.stack(planes, axis=0).astype(np.float32)
+    whole = stored.whole_tumour().astype(np.float32)
+    mask = (resize_array(whole, (size, size)) > 0.5).astype(np.float32)
+    return stacked, mask
+
+
+def _load_brats_volume(case: Case, size: int, channels: int, *, log: logging.Logger | None = None) -> tuple[np.ndarray, np.ndarray | None]:
+    from app.utils.images import resize_array
+    from brats import read_volume_directory
+    directory = case.images[0].parent
+    volume = read_volume_directory(directory)
+    order = case.options.get("channel_order") or sorted(volume["modalities"])
+    planes = []
+    for name in order[:channels]:
+        plane = volume["modalities"].get(name)
+        if plane is None:
+            continue
+        planes.append(plane)
+    if not planes:
+        raise SystemExit(f"Case {case.case_id} has no readable modality in {directory}")
+    middle = planes[0].shape[0] // 2
+    stacked = np.stack([resize_array(plane[middle], (size, size)) for plane in planes], axis=0)
+    segmentation = volume["segmentation"]
+    if segmentation is None:
+        return stacked.astype(np.float32), None
+    mask = (resize_array((segmentation[middle] > 0).astype(np.float32), (size, size)) > 0.5).astype(np.float32)
+    if log is not None:
+        log.info(
+            "Case %s uses the middle axial slice %d of the volume. To train across the whole "
+            "volume, export the slices first (scripts/prepare_brats.py over an HDF5 slice tree, "
+            "or slice the NIfTI volumes) and point --data at that manifest.",
+            case.case_id,
+            middle,
+        )
+    return stacked.astype(np.float32), mask
+
+
 def normalise(image: np.ndarray, mode: str) -> np.ndarray:
     if mode == "zscore":
         mean = float(image.mean())
@@ -110,6 +176,53 @@ def augment_pair(image: np.ndarray, mask: np.ndarray, rng: np.random.Generator) 
     if rng.random() < 0.2:
         image = image + rng.normal(0.0, 0.02, size=image.shape).astype(np.float32)
     return image, mask
+class OnDiskSegmentationDataset:
+    def __init__(self, cases: Sequence[Case], config: TrainingConfig, *, augment: bool, seed: int, logger: logging.Logger | None = None):
+        self.cases = list(cases)
+        self.config = config
+        self.augment = augment
+        self.logger = logger
+        self.rng = np.random.default_rng(seed)
+        self._cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+    def __len__(self) -> int:
+        return len(self.cases)
+
+    def _load(self, case: Case) -> tuple[np.ndarray, np.ndarray] | None:
+        if case.case_id in self._cache:
+            return self._cache[case.case_id]
+        image, mask = load_case_arrays(case, self.config.spatial_size, self.config.in_channels, log=self.logger)
+        if mask is None:
+            return None
+        prepared = (normalise(image, self.config.normalisation).astype(np.float32), mask.astype(np.float32))
+        if len(self._cache) < 512:
+            self._cache[case.case_id] = prepared
+        return prepared
+
+
+class TorchSegmentationDataset:
+    def __init__(self, loader: OnDiskSegmentationDataset):
+        self.loader = loader
+
+    def __len__(self) -> int:
+        return len(self.loader.cases)
+
+    def __getitem__(self, index: int):
+        import torch
+        case = self.loader.cases[index]
+        prepared = self.loader._load(case)
+        for attempt in range(1, min(8, len(self.loader.cases))):
+            if prepared is not None:
+                break
+            case = self.loader.cases[(index + attempt) % len(self.loader.cases)]
+            prepared = self.loader._load(case)
+        image, mask = prepared
+        mask = np.asarray(mask, dtype=np.float32)[None]
+        if self.loader.augment:
+            image, mask = augment_pair(image, mask, self.loader.rng)
+        return torch.from_numpy(np.ascontiguousarray(image)), torch.from_numpy(np.ascontiguousarray(mask))
+
+
 def build_dataset(dataset: Dataset, split: str, config: TrainingConfig, logger: logging.Logger, max_cases: int | None) -> tuple[np.ndarray, np.ndarray]:
     cases = dataset.cases_for(split)
     if max_cases:
@@ -137,15 +250,63 @@ def train(
     run_dir: Path,
 ) -> dict[str, Any]:
     import torch
-    from torch.utils.data import DataLoader, TensorDataset
+    from torch.utils.data import DataLoader
     from _common import torch_device
     from app.ml.losses import build_loss
     seed_everything(config.seed)
     device = torch_device(args.device)
     logger.info("Training %s on %s with %s", config.model_id, device, config.loss)
-    train_images, train_masks = build_dataset(dataset, "train", config, logger, args.max_cases)
-    validation_images, validation_masks = build_dataset(dataset, "validation", config, logger, args.max_cases or 64)
-    logger.info("Train tensors %s · validation tensors %s", train_images.shape, validation_images.shape)
+    train_cases = dataset.cases_for("train")
+    validation_cases = dataset.cases_for("validation")
+    if args.max_cases:
+        train_cases = train_cases[: args.max_cases]
+    if not train_cases:
+        raise SystemExit("The training split is empty.")
+    lazy = bool(getattr(args, "lazy_loading", False)) or any(
+        case.source_kind.startswith("brats") for case in train_cases
+    )
+    if not validation_cases:
+        validation_cases = train_cases[: max(1, min(len(train_cases) // 5, 32))]
+        logger.warning(
+            "No validation split is declared; using %d training case(s) for monitoring. Report "
+            "these numbers as training-time monitoring only.",
+            len(validation_cases),
+        )
+    if lazy:
+        logger.info(
+            "On-disk loading: %d training case(s), %d validation case(s) per pass",
+            len(train_cases),
+            min(len(validation_cases), getattr(args, "val_cases", 64)),
+        )
+        train_loader = DataLoader(
+            TorchSegmentationDataset(
+                OnDiskSegmentationDataset(train_cases, config, augment=config.augment, seed=config.seed, logger=logger)
+            ),
+            batch_size=config.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            drop_last=False,
+        )
+        validation_loader = DataLoader(
+            TorchSegmentationDataset(
+                OnDiskSegmentationDataset(
+                    validation_cases[: getattr(args, "val_cases", 64)],
+                    config,
+                    augment=False,
+                    seed=config.seed + 1,
+                    logger=None,
+                )
+            ),
+            batch_size=config.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+        )
+    else:
+        train_images, train_masks = build_dataset(dataset, "train", config, logger, args.max_cases)
+        validation_images, validation_masks = build_dataset(dataset, "validation", config, logger, args.max_cases or 64)
+        logger.info("Train tensors %s · validation tensors %s", train_images.shape, validation_images.shape)
+        train_loader = _ArrayLoader(train_images, train_masks, config.batch_size, shuffle=True, seed=config.seed, augment=config.augment)
+        validation_loader = _ArrayLoader(validation_images, validation_masks, config.batch_size, shuffle=False, seed=config.seed)
     model = build_architecture(config)
     model.to(device)
     optimiser = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
@@ -165,15 +326,7 @@ def train(
         best_score = float(state.get("best_score", -1.0))
         history = list(state.get("history", []))
         logger.info("Resumed from %s at epoch %s (best score %.4f)", args.resume, start_epoch, best_score)
-    train_loader = DataLoader(
-        TensorDataset(torch.from_numpy(train_images), torch.from_numpy(train_masks)),
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        drop_last=False,
-    )
     checkpoint_path = checkpoint_dir / f"{config.model_id}.pt"
-    rng = np.random.default_rng(config.seed)
     epochs_without_improvement = 0
     started = time.perf_counter()
     for epoch in range(start_epoch, config.epochs + 1):
@@ -181,16 +334,8 @@ def train(
         running = 0.0
         seen = 0
         for images, masks in train_loader:
-            batch_images = images.numpy()
-            batch_masks = masks.numpy()
-            if config.augment:
-                batch_images, batch_masks = zip(
-                    *[augment_pair(image, mask, rng) for image, mask in zip(batch_images, batch_masks, strict=False)]
-                )
-                batch_images = np.stack(batch_images)
-                batch_masks = np.stack(batch_masks)
-            tensor = torch.from_numpy(batch_images).to(device)
-            target = torch.from_numpy(batch_masks).to(device)
+            tensor = images.to(device)
+            target = masks.to(device)
             optimiser.zero_grad(set_to_none=True)
             logits = model(tensor)
             if isinstance(logits, (list, tuple)):
@@ -202,7 +347,7 @@ def train(
             running += float(loss.detach()) * tensor.shape[0]
             seen += tensor.shape[0]
         train_loss = running / max(1, seen)
-        validation_loss, validation_dice = _validate(model, validation_images, validation_masks, criterion, device, config.batch_size)
+        validation_loss, validation_dice = _validate_loader(model, validation_loader, criterion, device)
         if scheduler is not None:
             if config.scheduler == "plateau":
                 scheduler.step(validation_loss)
@@ -246,7 +391,7 @@ def train(
                     "trained_at": utc_now(),
                 },
             )
-            logger.info("  new best validation Dice %.4f → %s", best_score, checkpoint_path)
+            logger.info("  new best validation Dice %.4f -> %s", best_score, checkpoint_path)
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= config.patience:
@@ -268,6 +413,9 @@ def train(
         "checkpoint": str(checkpoint_path),
         "checkpoint_digest": file_digest(checkpoint_path) if checkpoint_path.exists() else None,
         "history": history,
+        "on_disk_loading": lazy,
+        "train_cases": len(train_cases),
+        "validation_cases": len(validation_cases),
         "environment": describe_environment(),
         "code_revision": code_revision(),
         "finished_at": utc_now(),
@@ -276,6 +424,65 @@ def train(
     logger.info("Run record written to %s", path)
     logger.info("Best validation Dice: %.4f (validation split only)", best_score)
     return record
+
+
+class _ArrayLoader:
+    def __init__(self, images: np.ndarray, masks: np.ndarray, batch_size: int, *, shuffle: bool, seed: int, augment: bool = False):
+        self.images = images
+        self.masks = masks
+        self.batch_size = max(1, batch_size)
+        self.shuffle = shuffle
+        self.augment = augment
+        self.rng = np.random.default_rng(seed)
+
+    def __len__(self) -> int:
+        return int(np.ceil(len(self.images) / self.batch_size))
+
+    def __iter__(self):
+        order = np.arange(len(self.images))
+        if self.shuffle:
+            self.rng.shuffle(order)
+        for start in range(0, len(order), self.batch_size):
+            index = order[start : start + self.batch_size]
+            images = self.images[index]
+            masks = self.masks[index]
+            if self.augment:
+                pairs = [
+                    augment_pair(image, np.asarray(mask, dtype=np.float32)[None], self.rng)
+                    for image, mask in zip(images, masks, strict=False)
+                ]
+                images = np.stack([pair[0] for pair in pairs]).astype(np.float32)
+                masks = np.stack([pair[1][0] for pair in pairs]).astype(np.float32)
+            yield images, masks
+
+
+def _validate_loader(model, loader, criterion, device) -> tuple[float, float]:
+    import torch
+    from app.utils.metrics import dice as dice_metric
+    model.eval()
+    total_loss = 0.0
+    total_dice = 0.0
+    seen = 0
+    with torch.no_grad():
+        for images, masks in loader:
+            tensor = images.to(device)
+            target = masks.to(device)
+            logits = model(tensor)
+            if isinstance(logits, (list, tuple)):
+                logits = logits[0]
+            loss = criterion(logits, target)
+            probability = _to_probability(logits, "probability")
+            predicted = (probability > 0.5).detach().cpu().numpy().astype(np.uint8)
+            truth = (target.detach().cpu().numpy() > 0.5).astype(np.uint8)
+            batch = predicted.shape[0]
+            total_dice += float(dice_metric(truth, predicted)) * batch
+            total_loss += float(loss.detach()) * batch
+            seen += batch
+    if not seen:
+        return float("nan"), 0.0
+    return total_loss / seen, total_dice / seen
+
+
 def _build_scheduler(optimiser, kind: str):
     from torch.optim import lr_scheduler
     if kind == "cosine":
