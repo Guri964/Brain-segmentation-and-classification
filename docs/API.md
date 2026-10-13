@@ -355,6 +355,54 @@ list: the platform never pads, re-orders or drops features to force a prediction
 
 ---
 
+### `GET /api/classification/image/models`
+
+The image-classification catalogue: one model card per Keras artefact, with `state`
+(`ready`, `checkpoint_missing`, `metadata_missing`, `framework_missing`, `incompatible`,
+`error`), the exact paths searched, the class list and order read from `metadata.json`, the
+input size, the recorded preprocessing, the metrics the training run reported (labelled as
+reported) and the trained parameter count once the model has been loaded.
+
+```json
+{
+  "models": [
+    {
+      "model_id": "brain_tumor_xception",
+      "display_name": "Tumour type (Xception, four classes)",
+      "task": "image_classification",
+      "state": "checkpoint_missing",
+      "available": false,
+      "reason": "brain_tumor_xception_final.keras is not installed. Place it - together with metadata.json - in /…/models/weights (see models/README.md).",
+      "model_path": "/…/models/weights/brain_tumor_xception_final.keras",
+      "metadata_file": "/…/models/weights/metadata.json",
+      "framework_available": null,
+      "classes": [],
+      "reported_metrics": null,
+      "metrics_provenance": "These numbers are the metrics the training notebook recorded…"
+    }
+  ]
+}
+```
+
+### `POST /api/classification/image` — multipart/form-data
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `file` | yes | One MRI image: `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tif`, `.tiff`, `.webp`; RGB or grayscale (converted), at least 16 × 16 |
+
+Runs the Keras Xception model over the image itself (not radiomics features, not a mask) and
+returns the four softmax values in the order `metadata.json` declares, as
+`predicted_index`, `predicted_label`, `probability`, `probabilities` and a `scores` list. The
+response also carries `classes_source` (the metadata file the order came from), `calibrated:
+false` with an explanation, the resize that was applied, the preprocessing name and its
+implementation, `inference_seconds`, the recorded metrics of the training run with a provenance
+sentence, and `label_semantics` (tumour type, **not** grade, malignancy or stage).
+
+Errors: `422` when no file is attached, `415` when the suffix is not an accepted image format or
+the bytes cannot be decoded, `409` when the checkpoint, its metadata or a compatible
+preprocessing declaration is missing, `503` when TensorFlow is not installed. A prediction is
+never returned without the model, and the endpoint never falls back to another model.
+
 ## Static assets
 
 `GET /` returns the dashboard shell when `frontend/dist` exists, and a JSON index

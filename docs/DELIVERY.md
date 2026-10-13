@@ -281,9 +281,10 @@ summary, because the fixture labels and masks are synthetic.
 
 | Command | Result |
 | --- | --- |
-| `/home/user/.venv/bin/python -m pytest tests -q` | **152 passed** in 97 s (CPU only) |
+| `/home/user/.venv/bin/python -m pytest tests -q` | **199 passed** in 89 s (CPU only) |
 | `cd frontend && npx tsc --noEmit` | **0 errors** under `strict`, `noUnusedLocals`, `noUnusedParameters` |
-| `cd frontend && npm run build` | Success: 881.93 kB JavaScript (250.46 kB gzipped), 38.36 kB CSS |
+| `cd frontend && npm run build` | Success: 888.37 kB JavaScript (252.13 kB gzipped), 38.49 kB CSS |
+| `python scripts/audit_integration.py` | Every artefact reported: two checkpoints load and run, three artefacts absent/not usable, each with the file it is missing |
 | `git status --porcelain` | clean after commit |
 
 Coverage: checkpoint loading and registry behaviour, preprocessing contracts (including the
@@ -464,3 +465,46 @@ waiting 2.3 s per batch.
 * No GPU is available on this machine, so this section contains no GPU utilisation figure of
   its own: the notebook prints the measured `nvidia-smi` utilisation and the
   preparation/step ratio on the T4 run, which is where the claim has to be made.
+
+## L. The four-class image classifier: what was integrated, what was refused
+
+`firstnb.ipynb` supplies a second, independent classifier - Xception over the image itself, four
+tumour-type classes - with two artefact files. It is now served end to end, and the parts that
+cannot be served honestly are refused *with the reason* rather than approximated.
+
+### L.1 What runs today
+
+| Layer | Delivery |
+| --- | --- |
+| Central paths | `backend/app/config.py` resolves every weight through one helper: `models/weights/` (or `BRAIN_WEIGHTS_DIR`) -> repository root -> `data/models/`, with `BRAIN_MODEL_XCEPTION` pinning the `.keras` file and `BRAIN_MODEL_XCEPTION_METADATA` the metadata |
+| Model module | `backend/app/ml/image_classifier.py` - lazy TensorFlow import, metadata contract validation, state machine (`ready`, `checkpoint_missing`, `metadata_missing`, `framework_missing`, `incompatible`, `error`), checkpoint/metadata agreement checks, NumPy Xception preprocessing, `predict()` |
+| Service | `backend/app/services/image_classification_service.py` - status, model catalogue, upload validation (suffix whitelist, decode, minimum size), inference, summary for `/api/capabilities` |
+| API | `GET /api/classification/image/models`, `POST /api/classification/image` (409 when the checkpoint, the metadata or the preprocessing declaration is missing, 503 when TensorFlow is absent, 415 for a non-image, 422 for an empty or too-small upload) |
+| Interface | `frontend/src/components/ImageClassifierPanel.tsx` on the *Classification* page: probability bars from the model's own output, the class order source, an explicit "not calibrated" note, the label semantics warning (type, not grade/malignancy/stage), the recorded metrics labelled as recorded, and a missing-model panel naming the directory to install the files into |
+| Tests | `tests/test_image_classifier.py` (state machine, metadata contract, preprocessing identity, HTTP errors, subprocess end-to-end inference), `tests/test_artifact_paths.py` (search order, actionable missing-file resolution, no weight tracked by git) |
+
+### L.2 What was verified, and how
+
+* **Preprocessing** — the NumPy implementation is compared against
+  `keras.applications.xception.preprocess_input` inside the driver: maximum absolute difference
+  **0.0**.
+* **End-to-end serving** — a miniature model with the notebook's exact signature
+  (299 x 299 x 3 RGB -> four softmax outputs) is built into a temporary weights directory with a
+  matching `metadata.json`; the endpoint returns four probabilities summing to 1, the class order
+  read from the metadata (renaming the classes in the metadata changes the served label), and a
+  metadata/model class-count disagreement is refused with `409` naming the mismatch.
+* **Honesty gates** — no label is produced when the checkpoint, the metadata or TensorFlow is
+  missing; the recorded metrics are printed with the sentence saying they were not re-measured
+  here; `calibrated` is `false` with the reason.
+* **Isolation** — the TensorFlow tests run in a subprocess because importing TensorFlow and then
+  `torch.compile` crashes this environment (`docs/LIMITATIONS.md` §16). The application itself
+  never calls `torch.compile`, so serving is unaffected.
+
+### L.3 What is still not possible, and why
+
+| Item | Reason |
+| --- | --- |
+| A prediction from the supplied four-class model | `brain_tumor_xception_final.keras` and `metadata.json` are not present in this workspace (they are the researcher's local artefacts and are never committed). Install them in `models/weights/` and the same endpoint serves them; nothing else has to change |
+| Verifying the reported 90.91 % / 90.67 % / 90.72 % / 93.92 % | The test split those numbers came from is not shipped. They are displayed as *reported by the training run*, never as measured here |
+| Serving `radiomics_cnn_model.pth` | It expects 21 features in the notebook's column order, with a scaler and a label map that were never saved; the feature table in this repository has 11 columns. `python scripts/audit_integration.py` prints the mismatch (`expects 21 features / table offers 11`) and the model stays disabled |
+| An ensemble | Only `segnet_model.pth` (4 x 256 x 256, z-scored) and `UNet-[...].pt` (1 x 512 x 512, `[0, 1]`) are present; they take different tensors, so fusing them would compare predictions made from different inputs. `/api/ensemble/compatibility` reports exactly that |

@@ -28,6 +28,7 @@ placeholder metrics and no fabricated predictions anywhere in this repository.
 | BraTS 2020 ingestion | Working: inspector, patient-level manifest builder, lazy HDF5/NIfTI loading | `scripts/inspect_brats.py`, `scripts/prepare_brats.py`, `scripts/_training.py` |
 | Radiomics feature table | Working: one labelled row per case in the application's own schema | `scripts/extract_radiomics.py` |
 | Tumour classification | Pipeline complete and served; **no artefact installed here**, so no class is predicted | `scripts/train_classification.py`, `backend/app/services/classification_service.py` |
+| Tumour **type** from the image (Keras Xception, four classes) | Serving path complete; the `.keras` checkpoint and its `metadata.json` are not installed in this deployment, so no class is predicted | `backend/app/ml/image_classifier.py`, `POST /api/classification/image` |
 | SQLite persistence + history + search | Working | `backend/app/database/` |
 | PDF report (14 sections) | Working | `backend/app/services/report_service.py` |
 | Model evaluation module | Working; reports "Not evaluated" until the test split has been run | `backend/app/services/evaluation_service.py`, `scripts/evaluate_models.py` |
@@ -43,8 +44,9 @@ pip install -r backend/requirements.txt
 # 2. Frontend build (optional: the API also serves JSON on its own)
 cd frontend && npm install && npm run build && cd ..
 
-# 3. Verify the checkpoints before using them
+# 3. Verify the checkpoints before using them (and see every artefact's real state)
 python scripts/check_models.py
+python scripts/audit_integration.py     # per-artefact audit: found, loaded, executed
 
 # 4. Run the application
 python backend/run.py            # http://localhost:5000
@@ -55,6 +57,10 @@ Development mode with hot reload:
 ```bash
 cd frontend && npm run dev       # http://localhost:5173, proxies /api to :5000
 ```
+
+Model weights are **not** in this repository. Put them in `models/weights/` (or point
+`BRAIN_WEIGHTS_DIR` elsewhere) - see [models/README.md](models/README.md) for the expected file
+names, the input contract of each artefact and the one checkpoint that cannot be served.
 
 Full instructions, including GPU setup and dataset preparation, are in
 [HOW_TO_RUN.md](HOW_TO_RUN.md).

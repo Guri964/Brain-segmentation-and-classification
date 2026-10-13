@@ -113,8 +113,26 @@ has a default.
 | `BRAIN_CORS_ORIGINS` | dev origins | Comma-separated allow-list |
 | `BRAIN_LOG_LEVEL` | `INFO` | Log verbosity |
 
-Model paths are configurable as well (`BRAIN_MODEL_SEGNET`, `BRAIN_MODEL_UNET`, …), so
-checkpoints can live outside the repository.
+Model paths are configurable as well (`BRAIN_MODEL_SEGNET`, `BRAIN_MODEL_UNET`,
+`BRAIN_MODEL_XCEPTION`, `BRAIN_MODEL_RADIOMICS_MLP`, …), so checkpoints can live outside the
+repository.
+
+### Model weights
+
+Nothing is downloaded and nothing is retrained by the application. Copy the artefacts into
+`models/weights/` (the default of `BRAIN_WEIGHTS_DIR`); `models/README.md` lists the expected
+file names and each one's input contract. `python scripts/audit_integration.py` then reports,
+per artefact, whether it was found, whether it loads and whether a forward pass on the
+documented input succeeds - and names exactly what is missing when it does not.
+
+The four-class image classifier additionally needs TensorFlow in the API environment
+(`pip install tensorflow-cpu`) plus `metadata.json` beside the checkpoint; without either, the
+endpoint answers 409 with the missing file and nothing else on the platform is affected.
+
+> **Do not run `torch.compile` in the same process as TensorFlow.** Importing TensorFlow and
+> then `torch.compile` (which pulls in `torch._dynamo` → `triton`) crashes the interpreter on
+> some environments, this one included. The API never calls `torch.compile`; the training
+> notebook does, so train and serve in different processes. See `docs/LIMITATIONS.md` §17.
 
 ---
 

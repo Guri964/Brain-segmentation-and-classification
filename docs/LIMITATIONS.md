@@ -127,7 +127,39 @@ are invented and fixture masks are blobs, so a fixture-trained artefact must nev
 in `data/models/classification/` for anything other than a demonstration, and no metric from it
 may be quoted. The artefact manifest records the source table, which makes that traceable.
 
-## 16. Not a medical device
+## 16. TensorFlow is optional, and it must not share a process with `torch.compile`
+
+The four-class image classifier needs TensorFlow/Keras. Nothing else in the platform does, so
+the import is lazy: `/api/capabilities`, the model card and every PyTorch endpoint work on an
+environment where TensorFlow is not installed at all, and `POST /api/classification/image`
+answers `503 dependency_missing` with the install hint only when a checkpoint is actually
+present and a prediction is requested.
+
+In this development environment, `import tensorflow` followed by `torch.compile` - which imports
+`torch._dynamo` and then `triton` - **segfaults the interpreter** (an incompatibility between
+the two native stacks, not an application bug; the installed `triton` 3.8 does not match
+`torch` 2.4.1). Consequences, all of them honoured by this repository:
+
+* the API never calls `torch.compile`, so serving a request cannot trigger it;
+* the training notebook may compile, because it runs in its own process;
+* the test suite runs the TensorFlow serving path in a **subprocess**
+  (`tests/tf_image_classifier_driver.py`) instead of importing TensorFlow into the pytest
+  process, which is also why the suite passes on a machine without TensorFlow.
+
+If you hit this in your own environment, align the versions (`pip install "triton==3.0.0"` for
+torch 2.4.x) or keep the two stacks in separate processes - never in the same training script.
+
+## 17. The four-class classifier's metrics are the training run's, not this deployment's
+
+`brain_tumor_xception` reports `test_accuracy 0.9091`, `macro_f1 0.9067`, `weighted_f1 0.9072`
+and `best_val_accuracy 0.9392` **because its `metadata.json` records them**. The test split they
+were computed on is not shipped with the weights, so this deployment cannot re-measure them and
+does not present them as verified. Every surface that prints them (`/api/capabilities`, the
+model card, the classification page, the PDF report) carries the provenance sentence saying so.
+The values are also class-imbalanced averages of a specific split; they say nothing about
+performance on another scanner, another protocol or another population.
+
+## 18. Not a medical device
 
 No part of this software has been reviewed, cleared or approved as a medical device.
 It is a research prototype. Outputs are AI-generated and are not intended to replace

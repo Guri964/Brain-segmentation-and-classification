@@ -10,17 +10,19 @@ import type {
   CompareResponse,
   EvaluationResponse,
   FlaggedError,
-  HistoryResponse,
   HealthReport,
   HealthStatus,
+  HistoryResponse,
+  ImageClassificationPrediction,
+  ImageClassifierModel,
   ModelHealth,
   ModelInfo,
-  ReportListResponse,
-  SystemInfo,
   PlanResponse,
   RadiomicsCatalogue,
   RadiomicsFeatureSet,
+  ReportListResponse,
   Statistics,
+  SystemInfo,
 } from "../types/api";
 
 export class ApiError extends Error {
@@ -174,6 +176,13 @@ export const api = {
   radiomicsCsvUrl: (analysisId: string) =>
     `/api/radiomics/analysis/${analysisId}/features.csv`,
 
+  imageClassifierModels: () =>
+    request<{ models: ImageClassifierModel[] }>("/api/classification/image/models"),
+  classifyImage: (form: FormData) =>
+    request<ImageClassificationPrediction>("/api/classification/image", {
+      method: "POST",
+      body: form,
+    }),
   assistantStatus: () => request<AssistantStatus>("/api/assistant/status"),
   ask: (analysisId: string | null, question: string) =>
     request<AssistantAnswer>("/api/assistant/ask", {

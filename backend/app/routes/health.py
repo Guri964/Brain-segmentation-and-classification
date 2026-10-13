@@ -54,6 +54,7 @@ def capabilities():
             "ensemble": ensemble.compatibility(),
             "radiomics": radiomics.backend_status(),
             "classification": classification.status(),
+            "image_classification": services["image_classification"].summary(),
             "assistant": assistant.status(),
             "explainability": services["explainability"].available_methods(),
             "evaluation": services["evaluation"].stored_results()["state"],

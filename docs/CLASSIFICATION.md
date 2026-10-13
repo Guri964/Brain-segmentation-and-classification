@@ -216,3 +216,48 @@ as if it were a finding.
    SegNet checkpoint defect.
 4. Radiomics features describe a region of interest on a slice, not a tumour volume.
 5. Physical units appear only when the input carries pixel spacing; a PNG never does.
+
+---
+
+## 8. The Keras image classifier: tumour type from the image (four classes)
+
+`firstnb.ipynb` trains a second, unrelated classifier: `Xception(weights="imagenet",
+include_top=False, input_shape=(299, 299, 3))` with a global-average-pooling head and a four-way
+softmax over `glioma / meningioma / pituitary / no tumour`. It consumes the **image**, not
+radiomics features and not a mask.
+
+### 8.1 Contract served by this application
+
+| Property | Value | Source of truth |
+| --- | --- | --- |
+| Checkpoint | `brain_tumor_xception_final.keras` | file name, overridable with `BRAIN_MODEL_XCEPTION` |
+| Class order | `class_to_index` in `metadata.json` | metadata, never hard-coded: the code sorts by the recorded index |
+| Input | `input_size` + 3 channels (299 × 299 × 3 for the supplied run) | metadata |
+| Preprocessing | the recorded name must be an Xception name; the implementation is `x / 127.5 - 1` in NumPy (bit-identical to `keras.applications.xception.preprocess_input`) | metadata + `image_classifier.xception_preprocess` |
+| Output | softmax over the declared classes; if the model returns non-normalised values they are softmaxed and the response says so | response `output_transform` |
+| Resize | bilinear (PIL) to the metadata size | response `input.resize` |
+
+### 8.2 What the serving path refuses to do
+
+* It never guesses a class order. A missing `metadata.json`, a `class_to_index` that is not an
+  exact `0..n-1` permutation of `classes`, fewer than two classes, a non-three-channel
+  `input_size`, or a preprocessing name this build does not implement all disable the model with
+  a message naming the problem.
+* It never serves an artefact that disagrees with its metadata: the checkpoint's output width
+  must equal the declared class count and its input shape must equal the declared size, otherwise
+  the request fails with `409` before an image is scored.
+* It never labels a prediction as a grade, a malignancy verdict or a stage. The four classes are
+  dataset annotations of tumour **type**; the dataset's `Grade` column (HGG/LGG) belongs to the
+  other classifier and the two are never combined.
+* It never presents a softmax value as calibrated confidence, and it never presents the metrics
+  recorded in `metadata.json` as measurements made by this deployment (see
+  `docs/LIMITATIONS.md` §17).
+
+### 8.3 Why it is disabled unless you install it
+
+The two artefact files are not in this repository (weights are never committed) and the
+application never downloads them. Until they are placed in `models/weights/`, the state is
+`checkpoint_missing`, the endpoint answers `409`, the UI shows the missing-file panel with the
+directory to use, and every other capability - segmentation, ensemble, radiomics, region
+measurements, reporting, the assistant - works exactly as before. `models/README.md` documents
+the expected files; `python scripts/audit_integration.py` reports the state of each of them.

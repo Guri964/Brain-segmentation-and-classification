@@ -23,6 +23,7 @@ import {
   StatusBadge,
 } from "../components/ui";
 import { FeatureBarChart } from "../components/charts";
+import ImageClassifierPanel from "../components/ImageClassifierPanel";
 import { useAnalysis, useCapabilities } from "../hooks/useAnalysis";
 import { api } from "../services/api";
 import {
@@ -602,6 +603,8 @@ export default function TumorClassificationPage() {
           </p>
         </CardBody>
       </Card>
+
+      <ImageClassifierPanel />
 
       <DisclaimerBanner
         text={

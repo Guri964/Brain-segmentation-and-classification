@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flask import Blueprint, current_app, jsonify
+from flask import Blueprint, current_app, jsonify, request
 
 classification_bp = Blueprint("classification", __name__, url_prefix="/api/classification")
 
@@ -15,10 +15,12 @@ def index():
     classification = services["classification"]
     status = classification.status()
     evaluation = services["evaluation"]
+    image_classification = services["image_classification"]
     return jsonify(
         {
             "status": status,
             "evaluation": evaluation.classification_summary(),
+            "image_classification": image_classification.status(),
             "label_semantics": {
                 "target": status.get("target_description"),
                 "explanation": (
@@ -71,3 +73,33 @@ def _shap_status() -> dict:
                 "above, which are computed from the artefact itself and need no extra dependency."
             ),
         }
+
+@classification_bp.get("/image/models")
+def image_models():
+    """The image-classification catalogue: what exists, what is missing and why."""
+
+    services = _services()
+    return jsonify({"models": services["image_classification"].models()})
+
+
+@classification_bp.post("/image")
+def classify_image():
+    """Classify one uploaded image with the Keras tumour-type model.
+
+    Answers 409 with the exact missing file when the checkpoint is not installed and 503 when
+    TensorFlow is not importable - never a label produced from anything else.
+    """
+
+    services = _services()
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        from ..errors import ValidationError
+
+        raise ValidationError(
+            "Attach one image as the multipart field 'file'.",
+            details={"field": "file"},
+        )
+    payload = services["image_classification"].classify_upload(
+        upload.filename, upload.read()
+    )
+    return jsonify(payload), 200

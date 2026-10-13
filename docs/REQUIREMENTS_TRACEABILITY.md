@@ -58,6 +58,7 @@ data** (the code refuses to run rather than guessing).
 | Item | Requirement | Implementation | Evidence |
 | --- | --- | --- | --- |
 | NO 1 | Tumour **classification**: which type, and "what stage / malignant or not" | Implemented for the label that actually exists — the WHO **grade group** (HGG/LGG) — with an explicit refusal of malignancy, clinical stage and prognosis, plus a 4-class image-classification path for the second dataset. The serving path stays disabled until a validated artefact (feature schema + scaler + held-out metrics) exists. | `docs/CLASSIFICATION.md`; `GET /api/classification`; UI *Tumour classification* (the page states "No class is reported as malignant, benign or staged"); `tests/test_classification_pipeline.py` |
+| NO 1b | Tumour **type** classification from the image (`firstnb.ipynb`: Xception, four classes glioma / meningioma / pituitary / no tumour) | Served by `backend/app/ml/image_classifier.py` + `image_classification_service.py`: the class order is read from `metadata.json` (never hard-coded), the preprocessing is the Xception scaling verified bit-identical to `keras.applications.xception.preprocess_input`, the checkpoint's output width and input shape must agree with the metadata before an image is scored, and the recorded metrics are labelled as the training run's. The two artefact files are not in this deployment, so the model reports `checkpoint_missing` and the endpoint answers 409 instead of a label. | `POST /api/classification/image`, `GET /api/classification/image/models`, UI *Classification* page -> "Tumour type from the image" | `tests/test_image_classifier.py` (state machine, metadata contract, preprocessing, serving path incl. a subprocess end-to-end run), `tests/test_artifact_paths.py` |
 | NO 2 | Explainable AI or chatbot that explains the finding and the reasons | Grounded assistant (`/api/assistant/ask`, `/api/assistant/history/<id>`): answers are assembled from the stored payload of that analysis (region measurements, radiomics values, model status, uncertainty, limitations), refuses out-of-scope questions, and never invents a reason. Grad-CAM answers "which pixels made this mask", not "why is this a tumour". | UI *Clinical support*; `tests/test_assistant.py`; `docs/LIMITATIONS.md` |
 | NO 3 | Radiomics dashboard: shape / intensity / texture / diagnostics visible in the UI, with charts | Per-family feature tables with definitions and units, per-category charts, ROI panel (voxel count, extent, bounding box, **centroid**, relative size, border contact), CSV/JSON export, and an honest "no spacing supplied → pixels" note. | UI *Radiomics*; `GET /api/radiomics/*`; `tests/test_radiomics.py` |
 | NO 4 | Actually use the SegNet + U-Net ensemble: `MRI → U-Net / SegNet → probability → average → final mask`, shown side by side | `ensemble_service` runs every compatible member on the identical preprocessed tensor, averages probabilities with explicit weights, reports per-model outputs, per-pair Dice/IoU agreement and the disagreement map, and refuses incompatible pairs with a reason. The UI has side-by-side mask, overlay and probability panels plus the ensemble panel. | UI *Model comparison*; `POST /api/models/compare`; `tests/test_inference_and_ensemble.py` |
@@ -84,8 +85,30 @@ data** (the code refuses to run rather than guessing).
    (previously the word "segment" won and the answer was about the mask).
 3. **Notebook** — regenerated so the embedded `radiomics_service.py` and the new
    `region_metrics.py` match the repository (`tests/test_kaggle_notebook.py` enforces this).
+4. **Central artefact resolution (`T2`)** — `backend/app/config.py` now resolves every weight
+   through one helper (`models/weights/` → repository root → `data/models/`, `BRAIN_WEIGHTS_DIR`
+   override) and `MODEL_PATHS` gained `brain_tumor_xception`. A missing file resolves to the
+   documented placement directory so the error names where to put it.
+5. **Four-class image classifier (`NO 1b`)** — new `backend/app/ml/image_classifier.py`,
+   `backend/app/services/image_classification_service.py`, the two endpoints above, the
+   `/api/capabilities` summary, and the UI panel `ImageClassifierPanel.tsx` on the
+   *Classification* page. It refuses to run without its checkpoint, its metadata or a
+   preprocessing it implements.
+6. **Weights are untracked (`T3`)** — `.gitignore` now covers `/models/weights/`, `*.pth`,
+   `*.pt`, `*.keras`, `*.h5`, `*.hdf5`, `*.ckpt`, `*.safetensors`; the three checkpoints that
+   were committed at the repository root (`segnet_model.pth`,
+   `UNet-[16, 32, 64, 128, 256].pt`, `radiomics_cnn_model.pth`) were removed from the index with
+   `git rm --cached`, which left the local files exactly where they were. `models/README.md`
+   documents the expected files and their contracts.
+7. **Audit by execution** — `scripts/audit_integration.py` loads each checkpoint through the
+   registry, runs one forward pass on the documented input and prints what it found; see
+   `docs/PROJECT_AUDIT.md` §10 for the results in this workspace.
+8. **TensorFlow isolation** — the TensorFlow-dependent tests run in a subprocess
+   (`tests/tf_image_classifier_driver.py`) because importing TensorFlow and then `torch.compile`
+   crashes this environment; see `docs/LIMITATIONS.md` §16.
 
-Test suite: 152 tests, all passing (CPU only).
+Test suite: 199 tests, all passing (CPU only). Frontend: `tsc --noEmit` clean,
+`npm run build` = 888.37 kB JS (252.13 kB gzip) + 38.49 kB CSS.
 
 ---
 
@@ -95,6 +118,7 @@ Test suite: 152 tests, all passing (CPU only).
 | --- | --- |
 | Any real-data accuracy, Dice, F1 or calibrated confidence | No BraTS 2020 data and no trained artefact exist in this repository. Training must run on Kaggle (`HOW_TO_RUN.md` §5); the application reports "not evaluated" until then. |
 | Classification predictions in the UI | Requires a validated classifier artefact (model + ordered feature schema + scaler + held-out metrics). The shipped `radiomics_cnn_model.pth` is incompatible (21 features expected, 11 available, undefined labels) and is refused. |
+| A four-class prediction | Requires `brain_tumor_xception_final.keras` + `metadata.json` in `models/weights/` and TensorFlow in the API environment. Neither is present here, so the endpoint reports the missing file and predicts nothing. |
 | Ensemble in the default deployment | Needs at least two compatible checkpoints for the same input specification. With only `unet_dynamic_512` usable for a grayscale upload, the ensemble reports exactly that reason instead of fusing one model with itself. |
 | Malignancy, clinical stage or prognosis | Not present in the labels. The dataset provides the WHO grade group; anything else would be a fabricated clinical claim. |
 | Physical (mm/cm) measurements from an HDF5 slice | The slices carry no voxel spacing; the API accepts spacing when it exists and labels pixel units otherwise. |

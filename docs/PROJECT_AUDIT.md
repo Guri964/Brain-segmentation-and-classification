@@ -150,6 +150,18 @@ is not used to train or serve anything.
 
 ---
 
+### 3.5 `brain_tumor_xception_final.keras` + `metadata.json` (four-class tumour type)
+
+| Property | Value |
+| --- | --- |
+| Source | `firstnb.ipynb` (supplied notebook, committed at the repository root): Xception + global average pooling + 4-way softmax |
+| Present in this workspace? | **No.** Neither file exists here, in `models/weights/`, or in `data/models/` |
+| What is therefore unverifiable | The real architecture summary, the real parameter count, the real class order and any real prediction. Nothing is simulated in its place |
+| What *is* verified | The serving contract: the endpoint, the metadata validation, the NumPy preprocessing (bit-identical to the Keras function, max abs difference `0.0`), and the end-to-end path driven with a locally built stand-in that has the notebook's exact input/output signature |
+| Metadata contract enforced | `classes` (>= 2), `class_to_index` (exact permutation), `input_size` (3 channels), `preprocessing` (must name Xception) |
+| Reported metrics | 0.9091 test accuracy / 0.9067 macro F1 / 0.9072 weighted F1 / 0.9392 best validation accuracy - **as recorded in the metadata of the training run**, re-measured nowhere |
+| Served by | `backend/app/ml/image_classifier.py`, `backend/app/services/image_classification_service.py`, `POST /api/classification/image`, UI *Classification* page |
+
 ## 4. Existing functionality (works as-is)
 
 | Component | Status | Notes |
@@ -266,3 +278,25 @@ this environment). `scripts/*.py` therefore ship as reproducible entry points wi
 | 1-channel image into 4-channel model | physically meaningless prediction | upload validation rejects it; modality-count is explicit in the UI |
 | 2-D masks treated as volumes | wrong "volume" numbers | extractor records `dimensionality` and never prints `cm^3` for 2-D |
 | Unvalidated classifier | false clinical signal | classifier gated behind a validated artifact + label mapping + metrics file |
+
+---
+
+## 10. Integration status of every artefact (audited by execution)
+
+Produced by `python scripts/audit_integration.py`, which loads each checkpoint through the same
+registry the API uses and runs one forward pass on the documented input shape. A successful
+forward pass proves the artefact is loadable and contract-compatible; it proves nothing about
+accuracy, and no accuracy number is produced by it.
+
+| Artefact | State | Evidence |
+| --- | --- | --- |
+| `segnet_model.pth` | **loads and runs** | 23 tensors, 151,105 parameters, forward pass on `1 x 4 x 256 x 256` returns logits `[-89.71, -15.19]` -> probability ~`0.0` (synthetic input, sigmoid applied outside the network as the notebook does) |
+| `UNet-[16, 32, 64, 128, 256].pt` | **loads and runs** | 46 tensors, 1,940,945 parameters, forward pass on `1 x 1 x 512 x 512` returns probabilities in `[0.0000, 0.0080]` (sigmoid inside the network) |
+| `brain_tumor_xception_final.keras` + `metadata.json` | **absent** | reported as `checkpoint_missing` with the directory to install into; serving path verified separately with a stand-in of the same contract |
+| `radiomics_cnn_model.pth` | **present, not usable** | first layer is `Linear(21 -> 128)`; the feature table in the repository has 11 columns, no scaler, no column order and no label map were saved with it. Reported as incompatible; never fed a padded vector |
+| MONAI U-Net (`best_u-net_model*.pth`) | **absent** | the notebook's MONAI member was never exported; the shipped `.pt` is the 1-channel Dynamic U-Net, a different model with a different input contract |
+| `raunet_brats_4ch.pt` | **absent** | produced by `scripts/train_unet.py`; until then no second four-channel member exists |
+| Ensemble | **not formable in this deployment** | the two present checkpoints take different tensors (`4x256x256` z-scored vs `1x512x512` in `[0, 1]`); `/api/ensemble/compatibility` explains this and refuses to fuse across contracts |
+
+Radiomics extraction was verified by executing it: the native backend produces **68 features**
+(diagnostics 17, first-order 19, GLCM 10, GLRLM 9, shape 13) on a synthetic region.

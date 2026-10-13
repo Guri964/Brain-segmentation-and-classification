@@ -14,6 +14,7 @@ from .services.assistant_service import AssistantService
 from .services.classification_service import ClassificationService
 from .services.ensemble_service import EnsembleService
 from .services.evaluation_service import EvaluationService
+from .services.image_classification_service import ImageClassificationService
 from .services.explainability_service import ExplainabilityService
 from .services.model_health_service import ModelHealthService
 from .services.preprocessing_service import (
@@ -79,6 +80,7 @@ def create_app(config_object=None, *, env: str | None = None) -> Flask:
     explainability = ExplainabilityService(registry, config)
     uncertainty = UncertaintyService(config)
     classification = ClassificationService(config, registry=registry)
+    image_classification = ImageClassificationService(config)
     evaluation = EvaluationService(registry, config, segmentation=segmentation, ensemble=ensemble)
     report = ReportService(config, repository=repository)
     assistant = AssistantService(config, repository=repository)
@@ -108,6 +110,7 @@ def create_app(config_object=None, *, env: str | None = None) -> Flask:
         "explainability": explainability,
         "uncertainty": uncertainty,
         "classification": classification,
+        "image_classification": image_classification,
         "evaluation": evaluation,
         "report": report,
         "assistant": assistant,

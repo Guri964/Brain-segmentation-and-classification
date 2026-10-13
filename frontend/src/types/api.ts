@@ -244,6 +244,7 @@ export interface Capabilities {
     note: string;
   };
   classification: ClassificationStatus;
+  image_classification: ImageClassificationSummary;
   assistant: AssistantStatus;
   explainability: {
     segmentation: Array<{
@@ -822,4 +823,111 @@ export interface ChatMessage {
   role: "user" | "assistant";
   text: string;
   answer?: AssistantAnswer;
+}
+
+/** One Keras image-classification model: where it is looked for and whether it is usable. */
+export interface ImageClassifierModel {
+  model_id: string;
+  display_name: string;
+  task: string;
+  framework: string;
+  state:
+    | "ready"
+    | "checkpoint_missing"
+    | "metadata_missing"
+    | "framework_missing"
+    | "incompatible"
+    | "error";
+  available: boolean;
+  reason: string;
+  model_file: string;
+  model_path: string;
+  model_file_present: boolean;
+  metadata_file: string;
+  metadata_present: boolean;
+  framework_available: boolean | null;
+  framework_version: string | null;
+  framework_error: string | null;
+  loaded: boolean;
+  parameter_count: number | null;
+  label_semantics: string;
+  preprocessing: string | null;
+  preprocessing_implementation: string;
+  input_size: number[] | null;
+  classes: string[];
+  class_to_index: Record<string, number>;
+  reported_metrics: Record<string, number> | null;
+  metrics_provenance: string;
+  training_config: Record<string, unknown> | null;
+  hardware: Record<string, unknown> | null;
+  architecture: string | null;
+  framework_version_recorded: string | null;
+  trainer: string;
+  searched: string[];
+  accepted_formats: string[];
+}
+
+export interface ImageClassificationSummary {
+  available: boolean;
+  state: string;
+  model_id: string;
+  display_name: string;
+  reason: string;
+  classes: string[];
+  input_size: number[] | null;
+  preprocessing: string | null;
+  reported_metrics: Record<string, number> | null;
+  metrics_provenance: string;
+  model_path: string;
+  metadata_path: string;
+}
+
+export interface ImageClassificationStatus {
+  available: boolean;
+  state: string;
+  reason: string;
+  models: ImageClassifierModel[];
+  accepted_formats: string[];
+  task: string;
+  task_description: string;
+  distinct_from_grade_model: string;
+  metrics_provenance: string;
+  install_note: string;
+  disclaimer: string;
+}
+
+export interface ImageClassificationPrediction {
+  model_id: string;
+  display_name: string;
+  available: boolean;
+  task: string;
+  filename: string | null;
+  predicted_index: number;
+  predicted_label: string;
+  probability: number;
+  classes: string[];
+  probabilities: number[];
+  scores: Array<{ index: number; label: string; probability: number }>;
+  class_to_index: Record<string, number>;
+  classes_source: string;
+  output_transform: string;
+  calibrated: boolean;
+  calibration_note: string;
+  input: {
+    filename: string | null;
+    original_shape: number[];
+    model_input_size: number[];
+    resize: string;
+  };
+  preprocessing: string | null;
+  preprocessing_implementation: string;
+  inference_seconds: number;
+  architecture: string | null;
+  framework_version_recorded: string | null;
+  reported_metrics: Record<string, number> | null;
+  metrics_provenance: string;
+  training_config: Record<string, unknown> | null;
+  label_semantics: string;
+  disclaimer: string;
+  upload?: { filename: string | null; bytes: number; decoded_shape: number[] };
 }

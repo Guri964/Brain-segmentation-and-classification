@@ -32,6 +32,20 @@ frontend/dist/
 frontend/node_modules/
 .vite/
 
+# Model weights and training artefacts never belong in git: they are large, they are not
+# reproducible from source, and they must be installed locally (see models/README.md).
+# The application never downloads or retrains them on its own; it reports them as missing.
+/models/weights/
+/models/**/*.pth
+/models/**/*.pt
+*.pth
+*.pt
+*.keras
+*.h5
+*.hdf5
+*.ckpt
+*.safetensors
+
 # Environment / secrets
 .env
 .env.*
