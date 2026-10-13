@@ -1,0 +1,182 @@
+# Brain abnormality research platform
+
+Segmentation, quantitative radiomics, explainable AI and uncertainty estimation for
+brain MRI, delivered as a Flask API with a React + TypeScript dashboard.
+
+**Research prototype. Outputs are AI-generated and are not intended to replace
+professional medical diagnosis.**
+
+The guiding rule of this codebase: a value that was not measured is reported as
+unavailable, with the reason, and never as a zero. There are no demo datasets, no
+placeholder metrics and no fabricated predictions anywhere in this repository.
+
+---
+
+## 1. What the platform does
+
+| Capability | State in this deployment | Where it is implemented |
+|---|---|---|
+| Single-channel segmentation (512×512 U-Net) | Working | `backend/app/services/segmentation_service.py` |
+| Four-channel segmentation (SegNet) | Checkpoint loads but produces an empty mask; **needs retraining** | `scripts/train_segnet.py` |
+| Attention U-Net (RAUNet, four channel) | Not trained; registered and reported as unavailable | `scripts/train_unet.py --architecture raunet` |
+| Probability ensemble (P = Σ wᵢ·Pᵢ) | Implemented; runs when two models share an input spec, refused otherwise | `backend/app/services/ensemble_service.py` |
+| Quantitative radiomics | Working (native extractor, 68 features on a 2-D slice) | `backend/app/services/radiomics_service.py`, `backend/app/ml/radiomics_native.py` |
+| Grad-CAM explanations | Working for the single-channel U-Net | `backend/app/ml/gradcam.py`, `explainability_service.py` |
+| Feature attribution | Implemented; shown when a classifier artefact exists | `backend/app/services/classification_service.py` |
+| Uncertainty (TTA, MC dropout, ensemble disagreement) | Working (test-time augmentation) | `backend/app/services/uncertainty_service.py` |
+| Classification branch | Disabled until a validated artefact exists | `scripts/train_classifier.py` |
+| SQLite persistence + history + search | Working | `backend/app/database/` |
+| PDF report (14 sections) | Working | `backend/app/services/report_service.py` |
+| Model evaluation module | Working; reports "Not evaluated" until the test split has been run | `backend/app/services/evaluation_service.py`, `scripts/evaluate_models.py` |
+| Contextual assistant | Working (local, grounded; LLM optional) | `backend/app/services/assistant_service.py` |
+
+## 2. Quick start
+
+```bash
+# 1. Python environment
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r backend/requirements.txt
+
+# 2. Frontend build (optional: the API also serves JSON on its own)
+cd frontend && npm install && npm run build && cd ..
+
+# 3. Verify the checkpoints before using them
+python scripts/check_models.py
+
+# 4. Run the application
+python backend/run.py            # http://localhost:5000
+```
+
+Development mode with hot reload:
+
+```bash
+cd frontend && npm run dev       # http://localhost:5173, proxies /api to :5000
+```
+
+Full instructions, including GPU setup and dataset preparation, are in
+[HOW_TO_RUN.md](HOW_TO_RUN.md).
+
+## 3. Documentation
+
+| Document | Contents |
+|---|---|
+| [HOW_TO_RUN.md](HOW_TO_RUN.md) | Installation, CPU/GPU setup, running, troubleshooting |
+| [docs/API.md](docs/API.md) | Every endpoint with its request and response shape |
+| [docs/DATASET.md](docs/DATASET.md) | Manifest format, folder layouts, labelling requirements, splits |
+| [docs/ALGORITHM_NOVELTY.md](docs/ALGORITHM_NOVELTY.md) | Baseline, the modifications, and the experiments that would justify each claim |
+| [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | What the platform cannot do, and why |
+| [docs/PROJECT_AUDIT.md](docs/PROJECT_AUDIT.md) | Audit of the original application (17 defects) |
+| [docs/CURRENT_ARCHITECTURE.md](docs/CURRENT_ARCHITECTURE.md) | As-found versus target architecture |
+| [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) | Phase plan and open questions |
+| [docs/DELIVERY.md](docs/DELIVERY.md) | What was delivered: changes, structure, algorithms, results, tests, setup, limitations |
+
+## 4. Repository layout
+
+```
+backend/
+  run.py                    entry point
+  requirements.txt
+  app/
+    __init__.py             application factory
+    config.py               environment-driven configuration
+    errors.py               error hierarchy and handlers
+    logging_config.py
+    routes/                 HTTP layer only (8 blueprints)
+    services/               all business logic
+    ml/
+      architectures/        SegNet, DynamicUNet, RAUNet
+      registry.py           checkpoint loading, caching, device selection
+      radiomics_native.py   extractor used when PyRadiomics is unavailable
+      gradcam.py            input-anchored Grad-CAM
+      losses.py
+      classifier_models.py
+    database/               schema + migrations + repository
+    schemas/                request validation
+    utils/                  io, image and metric helpers
+frontend/
+  src/
+    pages/                  11 dashboard pages
+    components/             shared UI, charts, image viewer
+    services/               API client and formatting
+    hooks/                  analysis state
+    types/                  API type mirror
+scripts/
+  check_models.py           reference verification of every checkpoint
+  make_splits.py            patient-level train/validation/test split
+  train_segnet.py           four-channel SegNet
+  train_unet.py             single-channel U-Net / four-channel RAUNet
+  train_classifier.py       radiomics classifier artefact
+  evaluate_models.py        reserved test split evaluation
+  run_ablations.py          one-component-at-a-time ablations
+  calibrate_ensemble.py     validation-only fusion weights
+  extract_deep_features.py  encoder embeddings for the fusion experiment
+  setup_env.py              environment report / installer
+tests/                      pytest suite (58 tests, CPU-only)
+docs/
+data/                       runtime storage (git-ignored)
+```
+
+## 5. What is shipped versus what has to be produced
+
+**Shipped and reused**
+
+* `UNet-[16, 32, 64, 128, 256].pt` — DynamicUNet, 1 channel, 512×512, internal
+  sigmoid. Verified as responsive: it loads, runs and produces a structured mask on a
+  deterministic reference phantom in ~0.5 s on CPU.
+* `segnet_model.pth` — SegNet(4→1), 256×256, logits. Verified as **not responsive**:
+  for every input available without the training data, its sigmoid output stays near
+  zero and the mask is empty. It is registered, reported honestly in the interface,
+  and excluded from ensembles. Retraining is required before it can appear in any
+  reported result.
+* `radiomics_cnn_model.pth` — requires 21 standardised features; only 11 columns
+  exist in `features_df.csv` and no feature schema, scaler or label mapping was saved
+  with it. Predictions are therefore **disabled**, and the interface explains exactly
+  what is missing.
+* `features_df.csv` — used only to demonstrate the classification data requirement,
+  never to train.
+
+**Produced by the scripts, when the real dataset is supplied**
+
+* Retrained SegNet and/or RAUNet checkpoints with a validated training run.
+* `data/models/evaluation_results.json` — test-split metrics with bootstrap intervals.
+* `data/models/model_selection.json` — which model was chosen, on which split, why.
+* `data/models/ensemble_calibration.json` — validation-only fusion weights.
+* `data/models/ablation_results.json` — one-component-difference ablations.
+* `data/models/classification/manifest.json` — the classifier artefact and its
+  feature schema.
+
+## 6. Honest current results
+
+| Item | Result |
+|---|---|
+| Reference check (`scripts/check_models.py`) | `unet_dynamic_512` responsive; `segnet_brats_4ch` `no_foreground`; `raunet_brats_4ch` missing; `radiomics_mlp_v1` incompatible |
+| Test-split segmentation metrics | **Not evaluated** — no labelled test split has been supplied |
+| Classification metrics | **Not evaluated** — no labelled feature table has been supplied |
+| Ensemble | Not available in this deployment: the two loaded checkpoints take different inputs (4×256×256 vs 1×512×512) |
+| Radiomics | 68 features extracted from the predicted region on a 2-D slice (~0.2 s), pixel-domain units only (no pixel spacing in the test input) |
+| Runtime | 0.46–0.58 s per 512×512 single-channel image on 2 CPU cores, no GPU |
+| Test suite | 58 tests, all passing, CPU-only |
+
+Nothing in the table above is estimated or extrapolated. Where a number could not be
+measured, the table says so.
+
+## 7. Safety properties enforced by the code
+
+* A 1-channel image can never be silently broadcast into a 4-channel model;
+  `preprocess_four_channel` refuses four identical uploads and reports which channels
+  matched.
+* No metric is produced without a reference standard; the comparison page labels
+  inter-model similarity as *agreement*, never as accuracy.
+* An empty predicted region yields an unavailable measurement, not a zero.
+* The assistant refuses questions about malignancy, grade, staging, prognosis,
+  survival and treatment before any backend runs, and says why.
+* Ensemble weights from the test split are rejected; calibration records the split it
+  used.
+* Grad-CAM heatmaps carry an explicit statement that a saliency map is not a
+  diagnosis and not a lesion outline.
+
+## 8. Licence and attribution
+
+Released for research use. The SegNet, U-Net and radiomics architectures and the
+original training notebook come from the existing company project; the platform
+structure, services, scripts, tests and dashboard were built on top of it.

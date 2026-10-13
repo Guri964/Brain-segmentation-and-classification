@@ -1,0 +1,675 @@
+export interface InputSpec {
+  channels: number;
+  height: number;
+  width: number;
+  normalisation: string;
+  dtype: string;
+}
+
+export interface FlaggedError {
+  error: { code: string; message: string; details?: Record<string, unknown> };
+}
+
+export interface HealthCheckEntry {
+  input: string;
+  input_shape?: number[];
+  raw_min?: number;
+  raw_max?: number;
+  raw_mean?: number;
+  probability_min?: number;
+  probability_max?: number;
+  probability_mean?: number;
+  probability_spread?: number;
+  foreground_fraction_at_threshold?: number;
+  threshold?: number;
+  verdict?: string;
+  explanation?: string;
+  error?: string;
+}
+
+export interface ModelHealth {
+  model_id: string;
+  status: string;
+  verdict: string;
+  device: string;
+  threshold: number;
+  reference: string;
+  output_semantics: string;
+  checks: HealthCheckEntry[];
+  message: string;
+  recommendation: string;
+  checked_at: string;
+  phantom_version: string;
+  responsive: boolean;
+}
+
+export interface ModelInfo {
+  model_id: string;
+  display_name: string;
+  task: string;
+  architecture: string;
+  path: string;
+  input_spec: InputSpec;
+  output_semantics: string;
+  trainer: string;
+  fixed_threshold: number;
+  description: string;
+  provenance: string;
+  status: string;
+  message: string;
+  device: string;
+  parameter_count: number | null;
+  load_seconds: number | null;
+  file_size_bytes: number | null;
+  available: boolean;
+  health?: ModelHealth;
+  checkpoint_container?: string;
+}
+
+export interface EnsembleGroup {
+  channels: number;
+  height: number;
+  width: number;
+  normalisation: string;
+  members: string[];
+  ensemblable: boolean;
+}
+
+export interface EnsembleCompatibility {
+  available: boolean;
+  groups: EnsembleGroup[];
+  model_status: Array<{
+    model_id: string;
+    status: string;
+    message: string;
+    input_spec?: InputSpec;
+    health?: unknown;
+  }>;
+  reasons: string[];
+}
+
+export interface ClassificationStatus {
+  available: boolean;
+  reason?: string;
+  model_id?: string;
+  model_version?: string;
+  trained_at?: string;
+  label_mapping?: Record<string, string>;
+  feature_count?: number;
+  metrics?: Record<string, unknown>;
+  calibration?: Record<string, unknown>;
+  target_description?: string;
+  legacy_checkpoint_note?: string | null;
+  required_artifacts?: string[];
+  requirements?: string[];
+}
+
+export interface AssistantStatus {
+  backend: "local" | "llm";
+  local_backend_available: boolean;
+  llm_requested: boolean;
+  llm_key_present: boolean;
+  llm_model: string | null;
+  note: string;
+  suggested_questions: string[];
+  disclaimer: string;
+}
+
+export interface Capabilities {
+  models: ModelInfo[];
+  model_health: {
+    phantom_version: string;
+    generated_at: string;
+    models: ModelHealth[];
+    responsive_models: string[];
+  };
+  ensemble: EnsembleCompatibility;
+  radiomics: {
+    preference: string;
+    pyradiomics_available: boolean;
+    selected_backend: string;
+    note: string;
+  };
+  classification: ClassificationStatus;
+  assistant: AssistantStatus;
+  explainability: {
+    segmentation: Array<{
+      model_id: string;
+      display_name: string;
+      available: boolean;
+      method: string;
+      target_layer: string | null;
+      reason: string | null;
+    }>;
+    classification: {
+      method: string;
+      available: boolean;
+      reason: string | null;
+    };
+    disclaimer: string;
+  };
+  evaluation: string;
+  disclaimer: string;
+}
+
+export interface SegmentationSummary {
+  model_id: string;
+  model_display_name: string;
+  device: string;
+  threshold: number;
+  input_shape: number[];
+  output_semantics: string;
+  foreground_pixels: number;
+  foreground_fraction: number;
+  probability_mean_in_mask: number | null;
+  probability_max: number;
+  probability_mean: number;
+  inference_seconds: number;
+  tta_used: boolean;
+  mc_dropout_used: boolean;
+  n_passes: number;
+  warnings: string[];
+  predictive_spread_mean?: number | null;
+  predictive_spread_max?: number | null;
+}
+
+export interface ModelResult {
+  available: boolean;
+  status: string;
+  message?: string;
+  descriptor?: ModelInfo;
+  summary?: SegmentationSummary;
+  artifacts?: Record<string, string>;
+  health?: { verdict: string; message: string; checks: HealthCheckEntry[] };
+  is_reference_validated?: boolean;
+}
+
+export interface EnsembleResult {
+  available: boolean;
+  strategy: string;
+  weights: Record<string, number>;
+  weight_source?: string;
+  members?: string[];
+  threshold?: number;
+  foreground_pixels?: number;
+  foreground_fraction?: number;
+  disagreement?: {
+    mean_pairwise_dice_agreement: number | null;
+    probability_std_mean: number;
+    probability_std_max: number;
+    pixels_with_majority_disagreement: number;
+    pairwise: Record<
+      string,
+      {
+        dice_agreement: number | null;
+        iou_agreement: number | null;
+        only_in_first: number;
+        only_in_second: number;
+      }
+    >;
+    note: string;
+  } | null;
+  reasons: string[];
+  warnings?: string[];
+  model_status?: Array<{
+    model_id: string;
+    status: string;
+    message: string;
+    health?: { verdict: string };
+  }>;
+  artifacts?: Record<string, string>;
+}
+
+export interface RadiomicsQuality {
+  mask_source?: string;
+  roi_voxel_count?: number;
+  roi_bounding_box?: number[][];
+  roi_extent?: number[];
+  roi_touches_fov_border?: boolean;
+  relative_roi_size?: number;
+  note?: string;
+}
+
+export interface RadiomicsFeatureSet {
+  available: boolean;
+  analysis_id?: string;
+  backend?: string;
+  backend_note?: string;
+  dimensionality?: string;
+  mask_source?: string;
+  feature_count?: number;
+  features?: Record<string, number | null>;
+  categories?: Record<string, string[]>;
+  spacing_available?: boolean;
+  warnings?: string[];
+  quality?: RadiomicsQuality;
+  unavailable_reason?: string;
+  descriptions?: Record<string, string>;
+  artifacts?: Record<string, string>;
+}
+
+export interface ClassificationResult {
+  available: boolean;
+  reason: string;
+  model_id?: string | null;
+  model_version?: string | null;
+  trainer?: string | null;
+  label_mapping?: Record<string, string>;
+  predicted_label?: string | null;
+  predicted_index?: number | null;
+  scores?: number[];
+  calibrated?: boolean;
+  calibration_method?: string | null;
+  metrics?: Record<string, number | null> | null;
+  feature_contributions?: Array<{
+    feature: string;
+    value?: number;
+    weight?: number;
+    contribution: number;
+    method?: string;
+  }>;
+  missing_features?: string[];
+  statement?: string;
+  target_description?: string | null;
+}
+
+export interface ExplainabilityEntry {
+  model_id: string;
+  available: boolean;
+  reason?: string;
+  method?: string;
+  target_layer?: string;
+  target_score?: string;
+  explanation?: string;
+  activation_shape?: number[];
+  heatmap_mean?: number;
+  heatmap_max?: number;
+  warnings?: string[];
+  artifacts?: Record<string, string>;
+  target_layer_semantics?: string;
+}
+
+export interface UncertaintyResult {
+  available: boolean;
+  method?: string;
+  n_passes?: number;
+  mean_dispersion?: number | null;
+  max_dispersion?: number | null;
+  p95_dispersion?: number | null;
+  high_uncertainty_fraction?: number | null;
+  boundary_dispersion?: number | null;
+  interior_dispersion?: number | null;
+  notes?: string[];
+  unavailable_reason?: string | null;
+  model_id?: string;
+  artifact_path?: string;
+  ensemble_disagreement?: Record<string, unknown> | null;
+}
+
+export interface ModelComparison {
+  state: string;
+  note: string;
+  models: Array<Record<string, unknown>>;
+  pairwise_agreement?: Record<
+    string,
+    {
+      dice_agreement: number | null;
+      iou_agreement: number | null;
+      only_in_first: number;
+      only_in_second: number;
+    }
+  >;
+  ensemble?: Record<string, unknown>;
+  mask_agreement_with_ensemble?: Record<
+    string,
+    {
+      dice_agreement: number | null;
+      iou_agreement: number | null;
+      pixels_a: number;
+      pixels_b: number;
+    }
+  >;
+}
+
+export interface AnalysisPayload {
+  analysis_id: string;
+  scan_identifier: string;
+  analysis_type: string;
+  created_at: string;
+  device: string;
+  threshold: number;
+  preprocessing: {
+    pipeline: string;
+    tensor_shape: number[];
+    channels: number;
+    spatial_size: number[];
+    normalisation: string;
+    metadata: Record<string, unknown>;
+  };
+  inputs: Record<string, string>;
+  models: Record<string, ModelResult>;
+  ensemble: EnsembleResult;
+  uncertainty: UncertaintyResult | null;
+  reference_mask: {
+    source: string;
+    model_id: string | null;
+    foreground_pixels: number;
+  };
+  radiomics: RadiomicsFeatureSet;
+  explainability: ExplainabilityEntry[];
+  classification: ClassificationResult;
+  model_comparison: ModelComparison;
+  artifacts_root: string;
+  report?: {
+    available: boolean;
+    report_id?: string;
+    relative_path?: string;
+    size_bytes?: number;
+    reason?: string;
+    generator_version?: string;
+  };
+  disclaimer: string;
+}
+
+export interface AnalysisMetadata {
+  analysis_id: string;
+  scan_identifier: string;
+  analysis_type: string;
+  status: string;
+  created_at: string;
+  completed_at?: string | null;
+  duration_seconds?: number | null;
+  device?: string | null;
+  notes?: string | null;
+  error_message?: string | null;
+  model_ids: string[];
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  preprocessing?: Record<string, unknown>;
+}
+
+export interface StoredRecords {
+  segmentation: Array<Record<string, unknown>>;
+  radiomics: Array<Record<string, unknown>>;
+  classification: Record<string, unknown> | null;
+  explainability: Array<Record<string, unknown>>;
+  uncertainty: Record<string, unknown> | null;
+  reports: Array<{
+    report_id: string;
+    path: string;
+    size_bytes: number;
+    created_at: string;
+    generator_version?: string;
+  }>;
+}
+
+export interface AnalysisDetail {
+  metadata: AnalysisMetadata;
+  stored_records: StoredRecords;
+  payload_available: boolean;
+  payload_source: string;
+  result: AnalysisPayload | null;
+}
+
+export interface HistoryItem {
+  analysis_id: string;
+  scan_identifier: string;
+  analysis_type: string;
+  status: string;
+  model_ids: string[];
+  created_at: string;
+  completed_at: string | null;
+  duration_seconds: number | null;
+  device: string | null;
+  notes: string | null;
+  error_message: string | null;
+  segmentation_count: number;
+  radiomics_count: number;
+  report_count: number;
+}
+
+export interface HistoryResponse {
+  items: HistoryItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+  filters: { statuses: string[]; analysis_types: string[]; models: string[] };
+}
+
+export interface Statistics {
+  totals: {
+    analyses: number;
+    segmentations: number;
+    radiomics: number;
+    reports: number;
+    classifications: number;
+  };
+  recent: HistoryItem[];
+  status_counts: Record<string, number>;
+  models: { ready: number; total: number };
+  evaluation_state: string;
+}
+
+export interface PlanStep {
+  step: string;
+  model_id: string;
+  status: string;
+  runnable: boolean;
+  health: string;
+  message: string;
+  input_spec: InputSpec;
+}
+
+export interface PlanResponse {
+  analysis_type: string;
+  requested_models: string[];
+  steps: PlanStep[];
+  ensemble: EnsembleCompatibility | null;
+  radiomics: {
+    runnable: boolean;
+    backend: Record<string, unknown>;
+    note: string;
+  };
+  uncertainty: { runnable: boolean; note: string };
+  explainability: {
+    runnable: boolean;
+    targets: Array<{ model_id: string; target_layer: string | null }>;
+  };
+  classification: ClassificationStatus;
+}
+
+export interface AnalysisOptions {
+  models: Array<{
+    model_id: string;
+    display_name: string;
+    status: string;
+    available: boolean;
+    input_spec: InputSpec;
+    output_semantics: string;
+    description: string;
+  }>;
+  analysis_types: Array<{
+    key: string;
+    label: string;
+    description: string;
+    channels: number;
+  }>;
+  thresholds: { default: number; min: number; max: number; step: number };
+  ensemble_strategies: Array<{
+    key: string;
+    label: string;
+    description: string;
+    usable: boolean;
+    note: string;
+  }>;
+  radiomics_masks: Array<{ key: string; label: string; description: string }>;
+  limits: {
+    max_upload_bytes: number;
+    max_files: number;
+    accepted_extensions: string[];
+  };
+}
+
+export interface RuntimeEntry {
+  model_id: string;
+  state: string;
+  reason?: string;
+  device?: string;
+  input_shape?: number[];
+  parameter_count?: number | null;
+  seconds_per_image?: number;
+  images_per_second?: number | null;
+  note?: string;
+}
+
+export interface SegmentationMetricEntry {
+  model_id: string;
+  display_name: string;
+  status: string;
+  metrics: Record<string, number> | null;
+  dataset?: Record<string, unknown>;
+  runtime_seconds_per_image?: number | null;
+  parameter_count?: number | null;
+}
+
+export interface EvaluationResponse {
+  evaluation: {
+    state: string;
+    reason?: string;
+    dataset?: Record<string, unknown>;
+    segmentation?: Record<string, unknown>;
+    classification?: Record<string, unknown>;
+    runtime?: Record<string, unknown>;
+    expected_artifact?: string;
+    produced_by?: string;
+    state_description?: string;
+  };
+  model_selection: {
+    state: string;
+    reason?: string;
+    expected_artifact?: string;
+    produced_by?: string;
+  } & Record<string, unknown>;
+  segmentation: {
+    state: string;
+    reason?: string;
+    models: Array<{
+      model_id: string;
+      display_name: string;
+      metrics: Record<string, number> | null;
+      status: string;
+    }>;
+    dataset?: Record<string, unknown>;
+    ensemble?: unknown;
+    ablation?: Array<Record<string, unknown>>;
+  };
+  classification: Record<string, unknown> & { state?: string; reason?: string };
+  runtime: { state: string; models?: RuntimeEntry[]; generated_at?: string };
+  model_health: {
+    models: ModelHealth[];
+    responsive_models: string[];
+    generated_at: string;
+    phantom_version: string;
+  };
+  training_runs: Array<Record<string, unknown>>;
+  protocol: {
+    splits: string[];
+    principles: string[];
+    scripts: Record<string, string>;
+  };
+}
+
+export interface AssistantAnswer {
+  answer: string;
+  topic: string;
+  sources: string[];
+  grounding: Record<string, unknown>;
+  backend: string;
+  suggestions: string[];
+  disclaimers: string[];
+  scope: string;
+  analysis_id?: string | null;
+}
+
+export interface CompareResponse {
+  analysis_type: string;
+  threshold: number;
+  input_preview: string;
+  input_channels: Array<{ label: string; image: string }>;
+  preprocessing: Record<string, unknown>;
+  models: Array<{
+    model_id: string;
+    available: boolean;
+    status: string;
+    message?: string;
+    summary?: SegmentationSummary;
+    probability?: string;
+    mask?: string;
+    overlay?: string;
+  }>;
+  comparison: ModelComparison;
+  ensemble?: EnsembleResult;
+}
+
+export interface ReportItem {
+  report_id: string;
+  analysis_id: string;
+  scan_identifier: string;
+  path: string;
+  size_bytes: number;
+  created_at: string;
+  generator_version?: string;
+}
+
+export interface ReportListResponse {
+  items: ReportItem[];
+}
+
+export interface SystemInfo {
+  python: string;
+  platform: string;
+  torch_version: string;
+  cuda_available: boolean;
+  cuda_device_name: string | null;
+  torch_threads: number;
+  selected_device: string;
+  config: Record<string, unknown>;
+}
+
+export interface HealthReport {
+  models: ModelHealth[];
+  responsive_models: string[];
+  generated_at: string;
+  phantom_version: string;
+}
+
+export interface FeatureRow {
+  name: string;
+  label?: string;
+  value: number | null;
+  category: string;
+  description?: string;
+  categoryLabel?: string;
+}
+
+export interface HealthStatus {
+  status: string;
+  environment: string;
+  time: string;
+  database: { path: string; schema_version: number };
+}
+
+export interface RadiomicsCatalogue {
+  backend: Record<string, unknown>;
+  categories: Array<{ key: string; label: string; description: string }>;
+  descriptions: Record<string, string>;
+  discretisation: Record<string, unknown>;
+  notes: string[];
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  text: string;
+  answer?: AssistantAnswer;
+}

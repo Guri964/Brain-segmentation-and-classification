@@ -1,0 +1,17 @@
+{
+  "name": "REPLACE-WITH-DATASET-NAME",
+  "version": "v1",
+  "root": "/absolute/path/to/dataset",
+  "cases": [],
+  "splits": {
+    "train": [],
+    "validation": [],
+    "test": []
+  },
+  "notes": [
+    "This file is a template. It contains no data on purpose: the platform must not ship or invent patient data.",
+    "Fill in one entry per case, then run: python scripts/make_splits.py --data <this file>",
+    "Every case needs patient_id so the split can be made per patient rather than per slice.",
+    "Four-channel models need four co-registered modalities per case; single-channel models need one image."
+  ]
+}

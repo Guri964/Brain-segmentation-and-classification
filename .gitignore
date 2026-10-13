@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime data: uploads, derived artefacts, reports, databases and checkpoints
+data/uploads/
+data/artifacts/
+data/reports/
+data/models/classification/
+data/models/checkpoints/
+data/models/deep_features.csv
+data/models/evaluation_runs/
+data/models/training/
+data/models/*.json
+data/*.db
+data/*.db-journal
+backend/data/
+logs/
+*.log
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/node_modules/
+.vite/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
