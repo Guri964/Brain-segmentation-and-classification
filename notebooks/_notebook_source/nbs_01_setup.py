@@ -161,6 +161,43 @@ RUN = {
     "image_classifier_epochs": 12,
     "image_classifier_enabled": True,
     "image_classifier_slices_per_patient": 6,
+    # --- second dataset: multiclass image classification --------------------
+    # Brain Tumor MRI Dataset (the dataset's own classes; never assumed to be HGG/LGG):
+    #   https://www.kaggle.com/datasets/masoudnickparvar/brain-tumor-mri-dataset
+    "classification_dataset_slug": "masoudnickparvar/brain-tumor-mri-dataset",
+    "classification_dataset_roots": [
+        "/kaggle/input/brain-tumor-mri-dataset",
+        "/kaggle/input/brain-tumor-mri-dataset/Training",
+        "/kaggle/input/brain-tumor-mri-classification-dataset",
+        "/kaggle/input/brain-tumor-classification-mri",
+        "data/brain_tumor_mri_dataset",
+    ],
+    # "auto" checks for a fixture manifest first and accepts a tree with >= 1000 images as the
+    # real release; anything else is recorded as unverified rather than claimed as real data.
+    "classification_dataset_provenance": "auto",
+    "classification_task_name": "brain tumour type (multiclass, classes defined by the dataset)",
+    "classification_image_size": 224,
+    "classification_validation_fraction": 0.15,
+    # Near-duplicate audit. The hash only proposes candidates; the pixel correlation confirms them,
+    # because an average hash cannot tell two similar-looking brain slices apart on its own.
+    "classification_duplicate_hash_size": 16,             # 16x16 = 256-bit average hash
+    "classification_duplicate_pixel_size": 64,             # size at which the pixels are compared
+    "classification_duplicate_hamming_threshold": 24,      # <= this many differing bits = candidate
+    "classification_duplicate_correlation_threshold": 0.995,  # Pearson r >= this = confirmed duplicate
+    "duplicate_exclusion_max_fraction": 0.05,              # above this share the audit is inconclusive
+    "exclude_duplicate_eval_images": True,                 # drop confirmed duplicates from validation/test
+    "radiomics_image_size": 256,                       # the size the application's radiomics runs at
+    "multiclass_radiomics_max_images": None,           # None = every image; an int caps it per class/split
+    "cnn_channels": [32, 64, 128],
+    "cnn_dropout": 0.3,
+    "cnn_epochs": 30,
+    "cnn_batch_size": 32,
+    "cnn_learning_rate": 3e-4,
+    "cnn_weight_decay": 1e-4,
+    "cnn_max_steps_per_epoch": None,
+    "cnn_validation_every_epochs": 1,
+    "cnn_early_stopping_patience": 8,
+    "skip_multiclass_cnn": False,
     # --- ensemble ----------------------------------------------------------
     "ensemble_members": ["segnet_brats_4ch", "raunet_brats_4ch"],
     "ensemble_weight_grid": 0.05,
@@ -190,6 +227,14 @@ for path in PATHS.values():
 
 SMOKE_OVERRIDES = {
     "epochs_segnet": 1,
+    # the multiclass pipeline is exercised end to end too, on a handful of small images
+    "classification_image_size": 64,
+    "classification_validation_fraction": 0.34,
+    "multiclass_radiomics_max_images": 4,
+    "cnn_epochs": 1,
+    "cnn_batch_size": 8,
+    "cnn_max_steps_per_epoch": 3,
+    "cnn_early_stopping_patience": 1,
     "epochs_unet": 1,
     "epochs_raunet": 1,
     "max_steps_per_epoch": 4,

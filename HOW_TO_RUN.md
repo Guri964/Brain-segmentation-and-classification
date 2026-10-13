@@ -196,11 +196,19 @@ machine has no GPU, 3 GB of RAM and 11 GB of disk, and `www.kaggle.com` is unrea
 Nothing about that is worked around with fake numbers -- instead the whole run is packaged as a
 notebook that you execute once on Kaggle.
 
+**Two datasets, two tasks.** The notebook trains segmentation on BraTS 2020 and a *separate*
+multiclass tumour-type model on the Brain Tumor MRI Dataset
+(`masoudnickparvar/brain-tumor-mri-dataset`, four classes: glioma / meningioma / pituitary /
+no tumour). Attach both datasets; a missing one is reported and its section skips, while the
+other still runs. The classes of the second dataset are read from its directories -- they are
+never assumed to be HGG/LGG, and the two label spaces are never mixed (the stacked ensemble
+rejects a member from the other dataset with the reason printed).
+
 ```bash
 # 0. the notebook is generated from its sources; regenerate it only if you edited them
 python notebooks/build_kaggle_notebook.py            # writes notebooks/brain_tumor_training_kaggle_t4.ipynb
 python notebooks/build_kaggle_notebook.py --check     # verifies the committed notebook is current
-python -m pytest tests/test_kaggle_notebook.py -q     # executes every cell against a synthetic fixture
+python -m pytest tests/test_kaggle_notebook.py -q     # executes every cell against both synthetic fixtures
 ```
 
 Then, on Kaggle:
@@ -208,8 +216,9 @@ Then, on Kaggle:
 1. Create a notebook and **File -> Import Notebook ->** `notebooks/brain_tumor_training_kaggle_t4.ipynb`.
 2. **Settings -> Accelerator -> GPU T4 x2** (any CUDA GPU works; cell 1 prints the device, the
    memory and whether mixed precision is on before anything is trained).
-3. **Add Data -> Datasets ->** `awsaf49/brats2020-training-data`. Internet access is not needed:
-   the notebook reads the dataset from `/kaggle/input` and embeds the project's own code.
+3. **Add Data -> Datasets ->** `awsaf49/brats2020-training-data` **and**
+   `masoudnickparvar/brain-tumor-mri-dataset`. Internet access is not needed: the notebook reads
+   both datasets from `/kaggle/input` and embeds the project's own code.
 4. Run all cells. Cell 2 (`RUN`) holds every size, epoch count and time budget; the training cells
    checkpoint every 500 steps / 20 minutes and resume from `checkpoints/<model>/last.pt`, so a
    session that ends mid-run continues in the next one instead of starting over.
@@ -238,11 +247,16 @@ What the notebook writes (all inside `brain_mri_artifacts/`):
 | `data/models/model_selection.json` | which checkpoint was chosen, on validation data only |
 | `data/models/ensemble_calibration.json` | fusion weights estimated on the validation split |
 | `data/models/artifacts_manifest.json` | provenance the API reads to label each model |
+| `checkpoints/brain_tumor_mri_cnn.pt` | multiclass CNN trained from scratch on the Brain Tumor MRI Dataset |
+| `data/models/classification_multiclass/<version>/` | stacking layer + both radiomics members + `manifest.json` (ordered schema, scaler, class mapping, metrics, caveats) |
+| `data/models/models_index.json` | every artefact with its task, label space, dataset and whether the API serves it |
 | `reports/` | EDA, mask and Grad-CAM figures, comparison tables, confusion matrix |
 
-Two rules the notebook enforces and the code checks: the reserved test split is read exactly once
-(after selection, which uses validation data only), and nothing in the repository is overwritten --
-`install_trained_artifacts.py` writes new files next to the shipped ones and records the hashes.
+Three rules the notebook enforces and the code checks: the reserved test split is read exactly once
+(after selection, which uses validation data only); nothing in the repository is overwritten --
+`install_trained_artifacts.py` writes new files next to the shipped ones and records the hashes; and
+the second dataset's splits are audited for near-duplicates of training images before any metric is
+computed (the audit reports its candidates and its confirmations, and refuses to empty a split).
 
 The classifier is trained on the feature schema the API computes at serving time
 (`analysis_service._run_radiomics()` extracts from the first display plane, i.e. T1, with bare

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 import numpy as np
 from ..ml.training_provenance import LABELS as TRAINING_LABELS
+from ..ml.training_provenance import load_models_index
 from ..ml.training_provenance import SERVING_NOTES as TRAINING_NOTES
 from ..ml.training_provenance import state_from_flags
 from ..utils.io import read_json, utc_now
@@ -92,6 +93,18 @@ class ClassificationService:
         payload["_directory"] = str(manifest_path.parent)
         self._artefact = payload
         return payload
+    def trained_artefacts(self) -> list[dict]:
+        """Every artefact the training run recorded, with its task and dataset.
+
+        A second dataset brings a second classification task (multiclass tumour type), which the
+        serving path does not feed. The interface still has to be able to say what exists, which
+        dataset it came from and whether it is being served -- this is that list.
+        """
+        data_dir = getattr(self.config, "DATA_DIR", None)
+        if data_dir is None:
+            return []
+        return load_models_index(data_dir)
+
     def training_provenance(self) -> dict:
         """What the artefact records about the data it was trained on.
 
@@ -184,6 +197,7 @@ class ClassificationService:
             },
             "caveats": artefact.get("caveats", []),
             "training": self.training_provenance(),
+            "trained_artefacts": self.trained_artefacts(),
             "trainer": artefact.get("trainer", "scripts/train_classification.py"),
             "calibration": artefact.get("calibration"),
             "target_description": artefact.get("target_description"),

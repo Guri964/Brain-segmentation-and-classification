@@ -125,11 +125,19 @@ def load_cells() -> list[tuple[str, str]]:
     return cells
 
 
-INTRO_MARKDOWN = """# BraTS 2020 training and evaluation on a Kaggle T4
+INTRO_MARKDOWN = """# Brain tumour segmentation and multiclass classification on a Kaggle T4
 
 This notebook trains and evaluates every model of the **Brain segmentation and classification**
-project on the real BraTS 2020 dataset and exports artefacts the Flask application loads
-unchanged.
+project and exports artefacts the Flask application loads unchanged. It uses the two datasets the
+project needs, for two different tasks:
+
+| Task | Dataset | Kaggle |
+| --- | --- | --- |
+| Segmentation (plus the HGG/LGG grade experiment) | BraTS 2020 | `awsaf49/brats2020-training-data` |
+| Multiclass tumour type (classes come from the dataset) | Brain Tumor MRI Dataset | `masoudnickparvar/brain-tumor-mri-dataset` |
+
+The two datasets are never mixed: the label spaces are different, and the stacked ensemble accepts
+a member only when its dataset and class list match the other members'.
 
 Verified context for this notebook (see `docs/DELIVERY.md`):
 
@@ -138,15 +146,22 @@ Verified context for this notebook (see `docs/DELIVERY.md`):
 * `UNet-[16, 32, 64, 128, 256].pt` runs but was never evaluated against labelled masks, so the
   same architecture is retrained from scratch on real data;
 * `raunet_brats_4ch.pt` does not exist yet;
-* the shipped classifier expects 21 features and no scaler was saved, so the classifier is
-  retrained here on features produced by the application's own extractor.
+* the shipped classifier expects 21 unnamed features and no scaler was saved, so neither
+  classification artefact is trained to fit it: each one records its own ordered feature schema,
+  scaler and label mapping, which is exactly what the API requires.
+
+What each part produces is recorded next to it: every artefact carries its task, its dataset and
+whether that dataset is real or a fixture, and `data/models/models_index.json` lists all of them.
 
 ## How to run it
 
 1. **Settings -> Accelerator -> GPU T4 x2** (or any CUDA GPU). Cell 1 verifies the device and
    prints the memory before anything is trained.
-2. **Add Data -> `awsaf49/brats2020-training-data`.** Internet access is not required; the
-   notebook reads the dataset from `/kaggle/input` and embeds all the code it needs.
+2. **Add Data -> `awsaf49/brats2020-training-data`** and **Add Data ->
+   `masoudnickparvar/brain-tumor-mri-dataset`.** Internet access is not required; the notebook
+   reads both datasets from `/kaggle/input` and embeds all the code it needs. Each dataset is
+   optional in the sense that a missing one is *reported* and its section skips -- with exact
+   reasons and no invented results -- while the other still runs.
 3. Run the cells in order. Cell 2 holds every size, epoch count and budget in one place.
 4. A full run does **not** have to finish in one session. Checkpoints carry model, optimiser,
    scheduler, AMP scaler and RNG state; re-running the training cells continues where the last

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 MANIFEST_NAME = "artifacts_manifest.json"
+INDEX_NAME = "models_index.json"
 INSTALL_RECORD_NAME = "install_record.json"
 
 # registry model id -> key used in the provenance manifest
@@ -27,7 +28,13 @@ MODEL_ID_TO_MANIFEST_KEY = {
     "segnet_brats_4ch": "segnet_brats_4ch",
     "unet_dynamic_512": "unet_dynamic_512_real_brats",
     "raunet_brats_4ch": "raunet_brats_4ch",
-    "radiomics_mlp_v1": "radiomics_grade_classifier",
+    # Deliberately absent: `radiomics_mlp_v1` is the *shipped* radiomics_cnn_model.pth, not the
+    # classifier a training run produced. Mapping it to the trained artefact would report the
+    # trained model's provenance for a checkpoint that was never trained here. Its provenance
+    # comes from the classifier artefact itself, which /api/classification reads.
+    # trained on the second dataset (multiclass tumour type), identified but not served
+    "brain_tumor_mri_cnn": "brain_tumor_mri_cnn",
+    "brain_tumor_mri_classifier": "brain_tumor_mri_classifier",
 }
 
 STATE_REAL = "trained_on_real_data"
@@ -96,6 +103,44 @@ def load_artifact_manifest(data_dir: Path | str) -> dict | None:
     return _read_json(manifest_path(data_dir))
 
 
+def models_index_path(data_dir: Path | str) -> Path:
+    return Path(data_dir) / "models" / INDEX_NAME
+
+
+def load_models_index(data_dir: Path | str) -> list[dict]:
+    """Every artefact the training run exported, with its task, label space and dataset.
+
+    Read from `models_index.json` (written by the notebook) and, when that file is absent, from
+    the manifests of whatever classifiers are installed. An empty list means "nothing recorded".
+    """
+    payload = _read_json(models_index_path(data_dir))
+    if payload and isinstance(payload.get("artefacts"), list):
+        return [entry for entry in payload["artefacts"] if isinstance(entry, dict)]
+    discovered: list[dict] = []
+    for directory in sorted((Path(data_dir) / "models").glob("classification*/*/manifest.json")):
+        manifest = _read_json(directory) or {}
+        discovered.append(
+            {
+                "name": manifest.get("model_id", directory.parent.name),
+                "task": manifest.get("task", "classification"),
+                "label_space": " / ".join(manifest.get("classes", []) or list((manifest.get("label_mapping") or {}).values())),
+                "dataset": (manifest.get("dataset") or {}).get("name"),
+                "dataset_synthetic": (manifest.get("dataset") or {}).get("synthetic"),
+                "state": "installed",
+                "file": str(directory.parent),
+                "served_by_application": "classification/" in str(directory),
+            }
+        )
+    return discovered
+
+
+def _dataset_block(manifest: dict, entry: dict) -> dict:
+    """The dataset block that belongs to this entry: the second dataset has its own."""
+    if str(entry.get("task", "")).startswith("multiclass"):
+        return manifest.get("classification_dataset") or {}
+    return manifest.get("dataset") or {}
+
+
 def _state_of(entry: dict, dataset: dict) -> str:
     declared = str(entry.get("state", "")).lower()
     if declared in {"not_trained", "missing"} or entry.get("trained_on") == "not_trained":
@@ -139,7 +184,7 @@ def describe(model_id: str, manifest: dict | None, *, data_dir: Path | str | Non
     key = MODEL_ID_TO_MANIFEST_KEY.get(model_id, model_id)
     models = manifest.get("models") or {}
     entry = models.get(key) or models.get(model_id)
-    dataset = manifest.get("dataset") or {}
+    dataset = _dataset_block(manifest, entry) if entry else (manifest.get("dataset") or {})
     if entry is None:
         return {
             "state": STATE_UNKNOWN,
@@ -160,6 +205,8 @@ def describe(model_id: str, manifest: dict | None, *, data_dir: Path | str | Non
     return {
         "state": state,
         "label": LABELS[state],
+        "task": entry.get("task"),
+        "classes": entry.get("classes"),
         "trained_on": entry.get("trained_on"),
         "evaluated_on": entry.get("evaluated_on"),
         "dataset": dataset.get("name"),

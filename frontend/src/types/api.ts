@@ -139,6 +139,18 @@ export interface ClassificationMetrics {
   improved_test_metrics?: ClassificationMetrics | null;
 }
 
+export interface TrainedArtefact {
+  name: string;
+  task: string;
+  label_space?: string | null;
+  dataset?: string | null;
+  dataset_synthetic?: boolean | null;
+  state?: string | null;
+  file?: string | null;
+  served_by_application?: boolean;
+  serving_note?: string | null;
+}
+
 export interface ClassificationStatus {
   available: boolean;
   reason?: string;
@@ -161,6 +173,7 @@ export interface ClassificationStatus {
   required_artifacts?: string[];
   requirements?: string[];
   training?: TrainingProvenance;
+  trained_artefacts?: TrainedArtefact[];
 }
 
 export interface ClassificationModelCard {

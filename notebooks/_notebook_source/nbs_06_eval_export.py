@@ -1,4 +1,4 @@
-# %% [cell] 21. Ensemble construction and validation-only calibration
+# %% [cell] 31. Ensemble construction and validation-only calibration
 # =============================================================================
 # SECTION 17 - Ensemble (probability fusion, weights from the validation split only)
 # =============================================================================
@@ -113,7 +113,7 @@ else:
         "An ensemble needs at least two models with the same input contract."
     )
 
-# %% [cell] 22. Validation-based checkpoint selection
+# %% [cell] 32. Validation-based checkpoint selection
 # =============================================================================
 # SECTION 18 - Checkpoint selection (validation split only)
 # =============================================================================
@@ -153,7 +153,7 @@ for model_id, entry in SELECTION["candidates"].items():
     print(f"{model_id:32s} best val Dice {entry['best_validation_dice']} @ epoch {entry['best_epoch']} ({entry['epochs_completed']} epochs)")
 print("selected:", SELECTION["selected_model"])
 
-# %% [cell] 23. Held-out test evaluation
+# %% [cell] 33. Held-out test evaluation
 # =============================================================================
 # SECTION 19 - Reserved test split: Dice, IoU, precision, recall, HD95, ASD
 # =============================================================================
@@ -355,7 +355,7 @@ if TEST_PATIENTS:
             }
         write_json(TEST_EVALUATION_PATH, results)
         print("=" * 78)
-        print("HELD-OUT TEST RESULTS (real BraTS data, patient-level split)")
+        print(f"HELD-OUT TEST RESULTS ({DATASET_NAME}, patient-level split)")
         print("=" * 78)
         for model_id, model_report in report["models"].items():
             aggregate = model_report.get("aggregate", {})
@@ -379,7 +379,7 @@ if TEST_PATIENTS:
 else:
     print("The test split is empty (fewer than 3 patients per stratum), so no test evaluation was run.")
 
-# %% [cell] 24. Explainability and visualisation
+# %% [cell] 34. Explainability and visualisation
 # =============================================================================
 # SECTION 20 - Explainable AI on real data
 # =============================================================================
@@ -440,7 +440,7 @@ if TEST_PATIENTS and (PATHS["checkpoints"] / "segnet_brats_4ch" / "best.pt").exi
 else:
     print("Explainability skipped: it needs a trained SegNet checkpoint and a non-empty test split.")
 
-# %% [cell] 25. Comparison charts and tables
+# %% [cell] 35. Comparison charts and tables
 # =============================================================================
 # SECTION 21 - Comparison charts and tables
 # =============================================================================
@@ -516,7 +516,7 @@ if CLASSIFICATION_EVALUATION:
         print(matrix.to_string())
         matrix.to_csv(PATHS["reports"] / "classification_confusion_matrix.csv")
 
-# %% [cell] 26. Saving artefacts (checkpoints, metrics, histories, configuration)
+# %% [cell] 36. Saving artefacts (checkpoints, metrics, histories, configuration)
 # =============================================================================
 # SECTION 22 - Artefacts
 # =============================================================================
@@ -577,7 +577,7 @@ print(f"artefact index: {PATHS['artifacts'] / 'artefact_index.json'} ({len(ARTEF
 for path in sorted(ARTEFACT_INDEX["files"])[:12]:
     print("  ", path)
 
-# %% [cell] 27. Export for the Flask application (with a compatibility check)
+# %% [cell] 37. Export for the Flask application (with a compatibility check)
 # =============================================================================
 # SECTION 23 - Export and compatibility validation
 # =============================================================================
@@ -821,6 +821,162 @@ if CLASSIFICATION_EVALUATION:
         }
     )
 
+# --- multiclass classification artefacts (second dataset) ---------------------
+# Separate directory, separate manifest, and a `task` field on every entry: the application can
+# tell a HGG/LGG grade model trained on BraTS apart from a tumour-type model trained on the
+# Brain Tumor MRI Dataset, and neither is silently served in place of the other.
+MULTICLASS_ARTEFACT_DIR = None
+MULTICLASS_COMPATIBILITY: dict = {"state": "not_available", "reason": "the multiclass pipeline did not run"}
+
+if MULTICLASS_EVALUATION.get("state") == "evaluated":
+    import joblib
+
+    stamp = utc_now().replace(":", "").replace("-", "")[:15]
+    MULTICLASS_MODEL_ID = "brain_tumor_mri_classifier"
+    MULTICLASS_VERSION = f"{MULTICLASS_MODEL_ID}-{stamp}"
+    MULTICLASS_ARTEFACT_DIR = EXPORT / "data" / "models" / "classification_multiclass" / MULTICLASS_VERSION
+    MULTICLASS_ARTEFACT_DIR.mkdir(parents=True, exist_ok=True)
+
+    member_files = {}
+    for member_name, estimator in MULTICLASS_FEATURE_MODELS.items():
+        filename = f"{member_name}.joblib"
+        joblib.dump(estimator, MULTICLASS_ARTEFACT_DIR / filename)
+        member_files[member_name] = filename
+    joblib.dump(MULTICLASS_STACK_RESULT["stacker"], MULTICLASS_ARTEFACT_DIR / "stacked_ensemble.joblib")
+
+    multiclass_manifest = {
+        "model_id": MULTICLASS_MODEL_ID,
+        "version": MULTICLASS_VERSION,
+        "task": "multiclass_classification",
+        "target_description": f"{RUN['classification_task_name']} -- {', '.join(CLASSIFICATION_CLASSES)}",
+        "label_mapping": MULTICLASS_INDEX_TO_LABEL,
+        "classes": CLASSIFICATION_CLASSES,
+        "kind": "sklearn",
+        "model_file": "stacked_ensemble.joblib",
+        "member_files": member_files,
+        "members": MULTICLASS_STACK_RESULT["members"],
+        "feature_schema": MULTICLASS_FEATURE_NAMES,
+        "provenance_contract": {
+            "feature_schema": "the application's own extractor, bare names, unordered input is refused",
+            "feature_sources": {
+                "extractor": "backend/app/ml/radiomics_native.py via RadiomicsService",
+                "mask_source": "auto_roi (Otsu threshold, largest connected component, morphology)",
+                "image": f"grayscale, {RUN['radiomics_image_size']}px, no voxel spacing -> pixel-domain units",
+                "serving_contract": (
+                    "The application computes radiomics from the *segmentation mask of the upload*, not from an "
+                    "auto-ROI on a single grayscale slice. This artefact is therefore exported for identification "
+                    "and reuse in research code, not as a drop-in replacement for the served classifier: the ROI "
+                    "definition differs, and pretending otherwise would change the input distribution silently."
+                ),
+            },
+            "preprocessing": {
+                "type": "standard_scaler",
+                "fit_on": "training split only",
+                "imputation": "training-split median",
+                "median": [float(value) for value in MULTICLASS_PREPROCESSING["imputer"].statistics_],
+                "mean": [float(value) for value in MULTICLASS_PREPROCESSING["scaler"].mean_],
+                "scale": [float(value) for value in MULTICLASS_PREPROCESSING["scaler"].scale_],
+                "feature_selection": "none - every schema feature is used, in feature_schema order",
+            },
+            "stacking_layer": {
+                "estimator": type(MULTICLASS_STACK_RESULT["stacker"]).__name__,
+                "fitted_on": MULTICLASS_STACK_RESULT["fitted_on"],
+                "members": MULTICLASS_STACK_RESULT["members"],
+                "coefficients": (
+                    np.asarray(MULTICLASS_STACK_RESULT["stacker"].coef_).tolist()
+                    if hasattr(MULTICLASS_STACK_RESULT["stacker"], "coef_")
+                    else None
+                ),
+            },
+            "cnn": {
+                "checkpoint": "checkpoints/brain_tumor_mri_cnn.pt",
+                "architecture": "classifier_architecture(channels, num_classes, dropout)",
+                "channels": list(RUN["cnn_channels"]),
+                "dropout": RUN["cnn_dropout"],
+                "input_size": RUN["classification_image_size"],
+                "normalisation": "per-image standardisation (mean/std of the image itself)",
+            },
+            "caveats": MULTICLASS_EVALUATION["caveats"],
+        },
+        "metrics": {
+            name: {
+                key: value
+                for key, value in entry.items()
+                if key in {"accuracy", "macro_f1", "weighted_f1", "macro_precision", "macro_recall", "roc_auc", "roc_auc_average", "samples", "per_class", "confusion_matrix", "confusion_matrix_order"}
+            }
+            for name, entry in MULTICLASS_EVALUATION["models"].items()
+        },
+        "evaluation_split": "the dataset's own Testing directory, minus near-duplicates of training images",
+        "selected_model": "stacked_logistic_regression",
+        "best_single_member": MULTICLASS_STACK_RESULT["best_single_member"],
+        "model_comparison": MULTICLASS_EVALUATION["stacked_ensemble"],
+        "splits": MULTICLASS_EVALUATION["protocol"],
+        "dataset": {
+            "name": CLASSIFICATION_DATASET_NAME,
+            "root": CLASSIFICATION_DATASET.get("root"),
+            "classes": CLASSIFICATION_CLASSES,
+            "synthetic": CLASSIFICATION_IS_SYNTHETIC,
+            "provenance_note": CLASSIFICATION_PROVENANCE_NOTE,
+            "split_source": CLASSIFICATION_SPLIT_SOURCE,
+        },
+        "seed": SEED,
+        "trained_at": utc_now(),
+        "trainer": "notebooks/brain_tumor_training_kaggle_t4.ipynb",
+    }
+    write_json(MULTICLASS_ARTEFACT_DIR / "manifest.json", multiclass_manifest)
+    write_json(MULTICLASS_ARTEFACT_DIR / "classification_results.json", MULTICLASS_EVALUATION)
+
+    # --- the CNN checkpoint, with a load-back check of its own -----------------
+    cnn_directory = PATHS["checkpoints"] / "brain_tumor_mri_cnn"
+    cnn_source = next((path for path in (cnn_directory / "best.pt", cnn_directory / "last.pt") if path.exists()), None)
+    if cnn_source is not None:
+        payload = torch.load(cnn_source, map_location="cpu", weights_only=False)
+        try:
+            probe_model = classifier_architecture(tuple(RUN["cnn_channels"]), len(CLASSIFICATION_CLASSES), float(RUN["cnn_dropout"]))
+            probe_model.load_state_dict(payload["state_dict"], strict=True)
+            probe_model.eval()
+            with torch.no_grad():
+                probe_output = probe_model(torch.zeros(1, 1, int(RUN["classification_image_size"]), int(RUN["classification_image_size"])))
+            cnn_probe = {
+                "state": "compatible",
+                "strict_load": True,
+                "input_shape": [1, 1, int(RUN["classification_image_size"]), int(RUN["classification_image_size"])],
+                "output_shape": list(probe_output.shape),
+                "classes": list(CLASSIFICATION_CLASSES),
+                "parameters": sum(parameter.numel() for parameter in probe_model.parameters()),
+            }
+        except Exception as exc:  # noqa: BLE001 - a checkpoint that cannot be reloaded is not exported
+            raise SystemExit(f"the multiclass CNN checkpoint could not be reloaded ({type(exc).__name__}: {exc})")
+        torch.save(payload, EXPORT / "checkpoints" / "brain_tumor_mri_cnn.pt")
+        MULTICLASS_COMPATIBILITY = {
+            "state": "compatible",
+            "model_id": "brain_tumor_mri_cnn",
+            "exported_as": "checkpoints/brain_tumor_mri_cnn.pt",
+            "probe": cnn_probe,
+            "note": "reloaded with the notebook's own builder and a strict state-dict load",
+        }
+    else:
+        MULTICLASS_COMPATIBILITY = {"state": "not_trained", "model_id": "brain_tumor_mri_cnn", "reason": "no checkpoint"}
+
+    # --- stacking layer probe: the exported stacker must score a real vector -----
+    try:
+        reloaded_stacker = joblib.load(MULTICLASS_ARTEFACT_DIR / "stacked_ensemble.joblib")
+        member_count = len(MULTICLASS_STACK_RESULT["members"])
+        probe_vector = np.full((1, member_count * len(CLASSIFICATION_CLASSES)), 1.0 / len(CLASSIFICATION_CLASSES), dtype=np.float32)
+        probe_scores = np.asarray(reloaded_stacker.predict_proba(probe_vector)).ravel()
+        MULTICLASS_COMPATIBILITY["stacker_probe"] = {
+            "state": "compatible",
+            "estimator": type(reloaded_stacker).__name__,
+            "input_features": int(probe_vector.shape[1]),
+            "probability_sum": float(probe_scores.sum()),
+            "classes": list(CLASSIFICATION_CLASSES),
+        }
+    except Exception as exc:  # pragma: no cover
+        raise SystemExit(f"the exported stacking layer could not be reloaded ({type(exc).__name__}: {exc})")
+
+    print("multiclass artefact :", MULTICLASS_ARTEFACT_DIR)
+    print("multiclass probe    :", MULTICLASS_COMPATIBILITY)
+
 # --- application-format metric files -----------------------------------------
 if results:
     write_json(EXPORT / "data" / "models" / "evaluation_results.json", results)
@@ -846,6 +1002,18 @@ PROVENANCE = {
         "synthetic": DATASET_IS_SYNTHETIC,
         "provenance_note": DATASET_PROVENANCE_NOTE,
     },
+    "classification_dataset": {
+        "name": CLASSIFICATION_DATASET_NAME,
+        "root": CLASSIFICATION_DATASET.get("root"),
+        "classes": CLASSIFICATION_CLASSES,
+        "images": {name: sum(len(paths) for paths in groups.values()) for name, groups in CLASSIFICATION_IMAGES.items()},
+        "split_source": CLASSIFICATION_SPLIT_SOURCE,
+        "split_method": "stratified by class (no patient identifiers exist in this dataset)",
+        "patient_level_split_possible": False,
+        "near_duplicate_audit": CLASSIFICATION_AUDIT,
+        "synthetic": CLASSIFICATION_IS_SYNTHETIC,
+        "provenance_note": CLASSIFICATION_PROVENANCE_NOTE,
+    },
     "environment": LOCK["environment"],
     "models": {},
 }
@@ -870,13 +1038,108 @@ for entry in COMPATIBILITY:
             if DATASET_IS_SYNTHETIC is True
             else "unverified_dataset"
         ),
+        "task": (
+            "classification"
+            if entry["model_id"] == "radiomics_grade_classifier"
+            else "segmentation"
+        ),
+        "label_space": (
+            "HGG / LGG (BraTS grade)"
+            if entry["model_id"] == "radiomics_grade_classifier"
+            else "tumour region (binary mask)"
+        ),
         "dataset": DATASET_NAME,
         "evaluated_on": "held-out patient-level test split" if results else None,
         "exported_file": entry.get("exported_as"),
         "best_validation_dice": entry.get("best_validation_dice"),
         "parameters": entry.get("parameters"),
     }
+for entry in ([MULTICLASS_COMPATIBILITY] if MULTICLASS_ARTEFACT_DIR is not None else []):
+    PROVENANCE["models"]["brain_tumor_mri_cnn"] = {
+        "state": "trained_and_evaluated" if entry.get("state") == "compatible" else "not_trained",
+        "task": "multiclass_classification",
+        "classes": CLASSIFICATION_CLASSES,
+        "trained_on": (
+            "real_brain_tumor_mri"
+            if CLASSIFICATION_IS_SYNTHETIC is False
+            else "synthetic_fixture"
+            if CLASSIFICATION_IS_SYNTHETIC is True
+            else "unverified_dataset"
+        ),
+        "dataset": CLASSIFICATION_DATASET_NAME,
+        "evaluated_on": "the dataset's own Testing directory, minus near-duplicates of training images",
+        "exported_file": entry.get("exported_as"),
+        "probe": entry.get("probe"),
+    }
+    PROVENANCE["models"][MULTICLASS_MODEL_ID] = {
+        "state": "trained_and_evaluated",
+        "task": "multiclass_classification",
+        "classes": CLASSIFICATION_CLASSES,
+        "trained_on": (
+            "real_brain_tumor_mri"
+            if CLASSIFICATION_IS_SYNTHETIC is False
+            else "synthetic_fixture"
+            if CLASSIFICATION_IS_SYNTHETIC is True
+            else "unverified_dataset"
+        ),
+        "dataset": CLASSIFICATION_DATASET_NAME,
+        "evaluated_on": "the dataset's own Testing directory, minus near-duplicates of training images",
+        "exported_file": str(MULTICLASS_ARTEFACT_DIR.relative_to(EXPORT)),
+        "members": MULTICLASS_STACK_RESULT["members"],
+        "best_single_member": MULTICLASS_STACK_RESULT["best_single_member"],
+        "statement": MULTICLASS_STACK_RESULT["statement"],
+    }
 write_json(EXPORT / "data" / "models" / "artifacts_manifest.json", PROVENANCE)
+
+# A flat index of every exported artefact with its task and dataset, so the application (and a
+# human reading the archive) can tell which dataset and which task each file belongs to without
+# opening the checkpoints themselves.
+MODELS_INDEX = {
+    "generated_at": utc_now(),
+    "produced_by": "notebooks/brain_tumor_training_kaggle_t4.ipynb",
+    "artefacts": [],
+}
+for entry in COMPATIBILITY:
+    MODELS_INDEX["artefacts"].append(
+        {
+            "name": entry["model_id"],
+            "task": "segmentation" if entry["model_id"] in {"segnet_brats_4ch", "raunet_brats_4ch", "unet_dynamic_512_real_brats"} else "classification",
+            "label_space": "tumour region (binary mask)" if "brats" in entry["model_id"] or "unet" in entry["model_id"] else "HGG / LGG (BraTS grade)",
+            "dataset": DATASET_NAME,
+            "dataset_synthetic": DATASET_IS_SYNTHETIC,
+            "state": entry["state"],
+            "file": entry.get("exported_as"),
+            "served_by_application": entry["model_id"] in {"segnet_brats_4ch", "raunet_brats_4ch", "unet_dynamic_512_real_brats", "radiomics_grade_classifier"},
+        }
+    )
+if MULTICLASS_ARTEFACT_DIR is not None:
+    MODELS_INDEX["artefacts"].append(
+        {
+            "name": "brain_tumor_mri_cnn",
+            "task": "multiclass_classification",
+            "label_space": " / ".join(CLASSIFICATION_CLASSES),
+            "dataset": CLASSIFICATION_DATASET_NAME,
+            "dataset_synthetic": CLASSIFICATION_IS_SYNTHETIC,
+            "state": MULTICLASS_COMPATIBILITY.get("state"),
+            "file": "checkpoints/brain_tumor_mri_cnn.pt",
+            "served_by_application": False,
+            "serving_note": "the API serves the radiomics classifier; this CNN is exported for identification and reuse",
+        }
+    )
+    MODELS_INDEX["artefacts"].append(
+        {
+            "name": MULTICLASS_MODEL_ID,
+            "task": "multiclass_classification",
+            "label_space": " / ".join(CLASSIFICATION_CLASSES),
+            "dataset": CLASSIFICATION_DATASET_NAME,
+            "dataset_synthetic": CLASSIFICATION_IS_SYNTHETIC,
+            "state": MULTICLASS_EVALUATION.get("state"),
+            "file": str(MULTICLASS_ARTEFACT_DIR.relative_to(EXPORT)),
+            "served_by_application": False,
+            "serving_note": "different ROI definition from the served pipeline; see provenance_contract in its manifest",
+        }
+    )
+write_json(EXPORT / "data" / "models" / "models_index.json", MODELS_INDEX)
 
 # --- how to install the artefacts -------------------------------------------
 INSTALL_NOTES = f"""# BraTS 2020 training artefacts
@@ -896,7 +1159,10 @@ patient-level split (train {SPLIT_SUMMARY['train']['patients']} / validation {SP
 | `data/models/evaluation_results.json` | held-out test metrics for every evaluated model |
 | `data/models/model_selection.json` | which model was chosen, on validation data only |
 | `data/models/ensemble_calibration.json` | fusion weights estimated on the validation split |
+| `checkpoints/brain_tumor_mri_cnn.pt` | multiclass CNN for the Brain Tumor MRI Dataset (from scratch, no pretrained weights) |
+| `data/models/classification_multiclass/<version>/` | multiclass artefact: stacking layer, both radiomics members, `manifest.json` with the ordered schema, scaler, class mapping and metrics |
 | `data/models/artifacts_manifest.json` | provenance the API reads to label each model |
+| `data/models/models_index.json` | every artefact with its task, label space, dataset and whether the application serves it |
 | `reports/` | comparison tables, confusion matrix, EDA and Grad-CAM figures |
 
 ## Installing into the project
@@ -920,8 +1186,25 @@ new artefacts, and it records everything in `data/models/artifacts_manifest.json
   split of the split recorded above, with threshold 0.5 and the project's own metric code.
 * The classification label is the dataset's HGG/LGG grade annotation -- not a malignancy
   verdict, not a stage, not a prognosis.
+* The multiclass metrics come from the second dataset's own Testing directory -- minus any image
+  whose perceptual hash matches a training image -- and the stacking layer was fitted on the
+  validation split only. The dataset carries no patient identifiers, so a patient-level split is
+  not possible and is not claimed.
+* The classes of the multiclass model are the dataset's own (glioma, meningioma, pituitary,
+  no tumour). They are not a malignancy verdict, a stage or a prognosis.
 * Anything missing from `checkpoints/` was not trained in that session; rerun the notebook
   and it resumes from its own checkpoints.
+
+## Two datasets, two tasks
+
+| Task | Dataset | Artefacts |
+| --- | --- | --- |
+| Segmentation (and the HGG/LGG grade experiment) | BraTS 2020 (`awsaf49/brats2020-training-data`) | `checkpoints/*`, `data/models/classification/<version>/`, `evaluation_results.json` |
+| Multiclass tumour type | Brain Tumor MRI Dataset (`masoudnickparvar/brain-tumor-mri-dataset`) | `checkpoints/brain_tumor_mri_cnn.pt`, `data/models/classification_multiclass/<version>/` |
+
+The two label spaces never mix: the stacked ensemble accepts a member only when its dataset and
+its class list match, so the BraTS grade model is rejected by construction (the notebook prints
+the rejection).
 """
 (EXPORT / "README.md").write_text(INSTALL_NOTES, encoding="utf-8")
 

@@ -1,4 +1,4 @@
-# %% [cell] 10. Patient-level train / validation / test splitting
+# %% [cell] 15. Patient-level train / validation / test splitting
 # =============================================================================
 # SECTION 9 - Patient-level splits (HGG/LGG stratified, leakage checked, frozen)
 # =============================================================================
@@ -97,7 +97,7 @@ if RUN["smoke_test"]:
     TRAIN_PATIENTS, VAL_PATIENTS, TEST_PATIENTS = TRAIN_PATIENTS[:2], VAL_PATIENTS[:1], TEST_PATIENTS[:1]
     print("smoke test: reduced to", len(TRAIN_PATIENTS), len(VAL_PATIENTS), len(TEST_PATIENTS), "patients")
 
-# %% [cell] 11. Reproducible baselines
+# %% [cell] 16. Reproducible baselines
 # =============================================================================
 # SECTION 10 - Reproducible baselines
 # =============================================================================
@@ -139,7 +139,7 @@ print(f"validation slices        : {VAL_PREVALENCE['slices']}")
 print(f"tumour pixel prevalence  : {VAL_PREVALENCE['prevalence']:.4f}")
 print(f"all-foreground Dice      : {dice_all_foreground:.4f}")
 
-# %% [cell] 12. Trainer core (AMP, resume, progress, early stopping, scheduling)
+# %% [cell] 17. Trainer core (AMP, resume, progress, early stopping, scheduling)
 # =============================================================================
 # SECTION 11 - Trainer
 # =============================================================================

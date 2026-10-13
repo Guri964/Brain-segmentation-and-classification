@@ -126,15 +126,22 @@ introduced.
 11 GB disk, no GPU, no BraTS data, and `www.kaggle.com` is unreachable from here (TLS reset). A
 60 GB dataset with 40-epoch GPU training is not a "try it and see" job, so instead of pretending,
 the complete run is packaged as an executable notebook (`notebooks/brain_tumor_training_kaggle_t4.ipynb`,
-28 code cells, generated from `notebooks/_notebook_source/` by `notebooks/build_kaggle_notebook.py`)
+38 code cells, generated from `notebooks/_notebook_source/` by `notebooks/build_kaggle_notebook.py`)
 that trains every model on a free Kaggle T4 and exports artefacts this repository installs with
 `scripts/install_trained_artifacts.py`.
 
-The notebook is not a sketch: the test suite executes all 28 of its code cells in order against the
-synthetic BraTS fixture and then opens the exported classifier with `ClassificationService` and the
-exported checkpoints with `ModelRegistry` (`tests/test_kaggle_notebook.py`, 9 tests, ~75 s on CPU).
+The notebook is not a sketch: the test suite executes all 38 of its code cells in order against
+both synthetic fixtures and then opens the exported classifiers with `ClassificationService` and the
+exported checkpoints with `ModelRegistry` (`tests/test_kaggle_notebook.py`, 15 tests, ~2 min on CPU).
 
 What it trains, and on what:
+
+The run covers **two datasets and two tasks**:
+
+| Task | Dataset | Kaggle | Label space |
+| --- | --- | --- | --- |
+| Segmentation (+ HGG/LGG grade experiment) | BraTS 2020 | `awsaf49/brats2020-training-data` | tumour region; HGG/LGG |
+| Multiclass tumour type | Brain Tumor MRI Dataset | `masoudnickparvar/brain-tumor-mri-dataset` | the dataset's own classes (glioma / meningioma / pituitary / no tumour), read from the directories |
 
 | Model | Architecture | Input | Selection |
 | --- | --- | --- | --- |
@@ -143,9 +150,15 @@ What it trains, and on what:
 | `raunet_brats_4ch` | the application's `build_raunet` | 4x256x256, z-scored | validation Dice during training |
 | `radiomics_grade_classifier` | logistic regression vs histogram gradient boosting | 58-68 radiomics features per patient | validation macro-F1 |
 | `slice_classifier_image_based` (optional, GPU only) | small 2-D CNN, slice predictions pooled per patient | 4x256x256 | comparison only, not exported |
+| `brain_tumor_mri_cnn` | small CNN trained from scratch (no pretrained weights, no internet) | 1x224x224 grayscale, per-image standardisation | best validation macro-F1 |
+| `brain_tumor_mri_classifier` | stacked ensemble: the CNN + two radiomics classifiers (logistic regression, histogram gradient boosting) combined by a multinomial logistic stacking layer | member probabilities | validation macro-F1; the stacking layer is fitted on validation probabilities and scored once on test |
+| `brain_tumor_mri_classifier` (radiomics members) | the application's own extractor on an automatic brain-region ROI (Otsu + largest component + morphology) | 256x256 grayscale, pixel-domain units | as above |
 
 Provenance and honesty rules the notebook enforces: patient-level splits frozen once and
-leak-checked; the reserved test split read exactly once, after selection; ensemble weights and
+leak-checked (BraTS; the second dataset has no patient identifiers, so its own train/test
+directories are kept and near-duplicates of training images are detected, reported and removed
+from the evaluation splits -- the audit counts candidates and confirmations separately and refuses
+to remove more than a small share of a split); the reserved test split read exactly once, after selection; ensemble weights and
 checkpoint selection from the validation split only; the loss is the project's own `BCEDiceLoss`
 with `from_logits` taken from each architecture's `output_semantics`; the classification schema is
 the one the API computes at serving time (see `docs/CLASSIFICATION.md` §3.1); every export is
@@ -239,15 +252,15 @@ summary, because the fixture labels and masks are synthetic.
 | Ensembling | Not available on this deployment: the two shipped checkpoints disagree on channels and on spatial size, so no fused probability map can exist. The interface says so instead of faking one |
 | Uncertainty (measured) | TTA over five passes: mean dispersion 0.0153, p95 0.0156, 3.99% of pixels in the high-uncertainty band |
 | BraTS/classification pipeline | Verified end to end on a synthetic fixture (F.1). No quality metric is claimed from it |
-| Kaggle notebook (executed here) | All 28 code cells run to completion against the fixture: cache, splits, three models with resumable checkpoints, two feature tables, four classifier candidates, validation-only ensemble calibration, one test-split evaluation with bootstrap intervals, Grad-CAM, export, compatibility checks. The numbers it produced are fixture numbers and are not quoted anywhere |
+| Kaggle notebook (executed here) | All 38 code cells run to completion against the fixtures: cache, splits, three models with resumable checkpoints, two feature tables, four classifier candidates, validation-only ensemble calibration, one test-split evaluation with bootstrap intervals, Grad-CAM, export, compatibility checks. The numbers it produced are fixture numbers and are not quoted anywhere |
 
 ## H. Test results
 
 | Command | Result |
 | --- | --- |
-| `/home/user/.venv/bin/python -m pytest tests -q` | **106 passed** in 69 s (CPU only) |
+| `/home/user/.venv/bin/python -m pytest tests -q` | **121 passed** in 120 s (CPU only) |
 | `cd frontend && npx tsc --noEmit` | **0 errors** under `strict`, `noUnusedLocals`, `noUnusedParameters` |
-| `cd frontend && npm run build` | Success: 879.67 kB JavaScript (249.76 kB gzipped), 38.36 kB CSS |
+| `cd frontend && npm run build` | Success: 880.60 kB JavaScript (250.08 kB gzipped), 38.36 kB CSS |
 | `git status --porcelain` | clean after commit |
 
 Coverage: checkpoint loading and registry behaviour, preprocessing contracts (including the
@@ -258,10 +271,14 @@ refusals, a frontend/backend contract test that checks every endpoint the interf
 in the Flask URL map, the BraTS slice reader/manifest builder/leakage check over a synthetic HDF5
 tree, the classification helpers, trainer and served artefact (including the refusal of an
 incomplete feature vector), the notebook (structure, freshness of the embedded sources, execution
-of every cell, and the exported artefacts opened by the real service classes), and the artefact
-installer (never overwriting shipped files, backing up before `--force`), and the training
-provenance rules (a fixture-trained model is never reported as trained on real data, and absent
-provenance is its own state rather than an assumption).
+of every cell against both fixtures, the second dataset's discovery/splits/leakage audit, the
+stacked ensemble's compatibility guard -- including the recorded refusal of the BraTS grade
+classifier as an incompatible member -- and the exported artefacts opened by the real service
+classes), the artefact installer (never overwriting shipped files, backing up before `--force`,
+installing the second dataset's artefacts and labelling each one with its task and dataset), and
+the training provenance rules (a fixture-trained model is never reported as trained on real data,
+absent provenance is its own state rather than an assumption, and the shipped legacy classifier
+does not inherit the trained classifier's provenance).
 
 ## I. Setup
 
@@ -270,7 +287,7 @@ python -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt          # add requirements-dev.txt for tests
 .venv/bin/python scripts/setup_env.py                      # environment report
 .venv/bin/python scripts/check_models.py                   # reference verification of the checkpoints
-.venv/bin/python -m pytest tests -q                        # 106 tests
+.venv/bin/python -m pytest tests -q                        # 121 tests
 
 cd frontend && npm install && npm run build && cd ..
 .venv/bin/python backend/run.py                            # http://127.0.0.1:5000

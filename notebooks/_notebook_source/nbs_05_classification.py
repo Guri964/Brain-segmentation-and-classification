@@ -1,4 +1,4 @@
-# %% [cell] 17. Classification dataset: radiomics features in the application's schema
+# %% [cell] 22. Classification dataset: radiomics features in the application's schema
 # =============================================================================
 # SECTION 14 / 16 - Classification data (radiomics features in the application's schema)
 # =============================================================================
@@ -312,7 +312,7 @@ else:
         "skipped: the platform must not train on an invented label."
     )
 
-# %% [cell] 18. Baseline and improved classification
+# %% [cell] 23. Baseline and improved classification
 # =============================================================================
 # SECTION 15 - Baseline and improved classifiers on the same held-out split
 # =============================================================================
@@ -568,7 +568,7 @@ if CLASSIFICATION_POSSIBLE and FEATURE_ROWS:
 else:
     print("Classification skipped: no labelled feature table (see the section above for the reason).")
 
-# %% [cell] 19. Image-based classifier (optional, second view on the same split)
+# %% [cell] 24. Image-based classifier (optional, second view on the same split)
 # =============================================================================
 # SECTION 15b - Image-based classifier on the same patient-level split
 # =============================================================================
@@ -728,7 +728,7 @@ else:
         "and no image-based number is reported in its place."
     )
 
-# %% [cell] 20. Radiomics quality: reference mask vs predicted mask
+# %% [cell] 25. Radiomics quality: reference mask vs predicted mask
 # =============================================================================
 # SECTION 16 - Radiomics extraction detail and quality
 # =============================================================================

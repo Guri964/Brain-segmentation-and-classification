@@ -110,6 +110,30 @@ feature, or that carries unknown names, is refused and the missing names are lis
 scaler or feature order was ever saved with it, and inventing the missing 10 would produce
 arbitrary numbers.
 
+### 2.1 The second classification task (multiclass tumour type)
+
+The project also trains a classifier on a **different dataset with a different label space**:
+the Brain Tumor MRI Dataset (`masoudnickparvar/brain-tumor-mri-dataset`), whose four classes are
+read from its directories (glioma, meningioma, pituitary, no tumour). It is not HGG/LGG and it is
+never mixed with the BraTS grade model:
+
+* its artefacts are exported to `data/models/classification_multiclass/<version>/`, with a
+  `task: multiclass_classification` field, the class list, the ordered feature schema, the fitted
+  scaler and the recorded metrics;
+* the stacked ensemble that combines its members (from-scratch CNN + two radiomics classifiers)
+  is guarded by an explicit compatibility check: identical dataset id, identical class order,
+  identical images per split, probabilities that sum to one. The notebook offers the BraTS grade
+  classifier as a candidate on purpose so the guard demonstrates the refusal, with the reason
+  printed and stored;
+* `data/models/models_index.json` lists every artefact with its task, label space, dataset,
+  synthetic flag and whether the API serves it, and `/api/classification` exposes the same list as
+  `trained_artefacts`;
+* the multiclass artefact is **not** served by the upload pipeline: its ROI is derived from a
+  single grayscale slice (Otsu brain region) while the API measures radiomics inside the
+  segmentation mask of a four-modality upload. Its manifest says so in
+  `provenance_contract.feature_sources.serving_contract` instead of pretending the two are the
+  same input.
+
 ### 3.1 The schema a served prediction needs
 
 `analysis_service._run_radiomics()` extracts features from `display_reference`, which is

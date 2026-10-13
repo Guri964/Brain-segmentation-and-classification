@@ -200,6 +200,34 @@ export default function TumorClassificationPage() {
               {status?.legacy_checkpoint_note ? (
                 <InfoNote tone="neutral">{status.legacy_checkpoint_note}</InfoNote>
               ) : null}
+              {status?.trained_artefacts?.length ? (
+                <>
+                  <p className="text-sm font-semibold text-clinical-700 dark:text-clinical-200">
+                    Artefacts this deployment has trained
+                  </p>
+                  <DataTable
+                    columns={["Artefact", "Task", "Label space", "Dataset", "Served here"]}
+                    rows={status.trained_artefacts.map((artefact) => [
+                      artefact.name,
+                      artefact.task.replace(/_/g, " "),
+                      artefact.label_space ?? NOT_AVAILABLE,
+                      artefact.dataset
+                        ? `${artefact.dataset}${artefact.dataset_synthetic === true ? " (synthetic fixture)" : ""}`
+                        : NOT_AVAILABLE,
+                      artefact.served_by_application ? "yes" : "no",
+                    ])}
+                  />
+                  {status.trained_artefacts.some((artefact) => !artefact.served_by_application) ? (
+                    <InfoNote tone="neutral">
+                      Artefacts marked &quot;no&quot; were trained on a different dataset and input
+                      contract than the upload pipeline provides, so they are identified here but
+                      not used to score an uploaded scan.{" "}
+                      {status.trained_artefacts.find((artefact) => artefact.serving_note)?.serving_note ??
+                        "The reason is recorded in each artefact's manifest."}
+                    </InfoNote>
+                  ) : null}
+                </>
+              ) : null}
             </>
           ) : null}
         </CardBody>

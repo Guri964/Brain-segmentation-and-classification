@@ -44,12 +44,24 @@ CHECKPOINTS = {
     "raunet_brats_4ch.pt": ("raunet_brats_4ch.pt", "BRAIN_MODEL_RAUNET"),
     "unet_dynamic_512_real_brats.pt": ("unet_dynamic_512_real_brats.pt", "BRAIN_MODEL_UNET"),
 }
+# Checkpoints trained on the *second* dataset (multiclass tumour type). They are installed next to
+# the segmentation ones, but nothing points the application at them: the API serves the radiomics
+# classifier that matches its own input contract, and `models_index.json` records why.
+EXTRA_CHECKPOINTS = {
+    "brain_tumor_mri_cnn.pt": "brain_tumor_mri_cnn.pt",
+}
 # metric/provenance files in the export -> destination name under <data-dir>/models
 MODEL_FILES = {
     "evaluation_results.json": "evaluation_results.json",
     "model_selection.json": "model_selection.json",
     "ensemble_calibration.json": "ensemble_calibration.json",
     "artifacts_manifest.json": "artifacts_manifest.json",
+    "models_index.json": "models_index.json",
+}
+# artefact directories under <export>/data/models -> destination under <data-dir>/models
+ARTEFACT_DIRECTORIES = {
+    "classification": "classification",                      # BraTS HGG/LGG radiomics classifier (served)
+    "classification_multiclass": "classification_multiclass",  # Brain Tumor MRI stacking ensemble (identified, not served)
 }
 REQUIRED_LAYOUT = ("checkpoints", "data/models")
 
@@ -162,6 +174,15 @@ def build_report(source: Path, data_dir: Path, *, force: bool, dry_run: bool, lo
         report["installed"].append(entry)
         report["environment"][env_var] = str((models_dir / target_name).resolve())
 
+    for name, target_name in EXTRA_CHECKPOINTS.items():
+        origin = source / "checkpoints" / name
+        if not origin.exists():
+            continue
+        entry = install_file(origin, models_dir / target_name, force=force, dry_run=dry_run, logger=logger)
+        entry["model_id"] = target_name.replace(".pt", "")
+        entry["note"] = "trained on the second dataset (multiclass tumour type); the API does not serve it"
+        report["installed"].append(entry)
+
     for name, target_name in MODEL_FILES.items():
         origin = source / "data" / "models" / name
         if not origin.exists():
@@ -171,20 +192,20 @@ def build_report(source: Path, data_dir: Path, *, force: bool, dry_run: bool, lo
             install_file(origin, models_dir / target_name, force=force, dry_run=dry_run, logger=logger)
         )
 
-    classification_source = source / "data" / "models" / "classification"
-    if classification_source.is_dir() and any(classification_source.iterdir()):
+    for source_name, target_name in ARTEFACT_DIRECTORIES.items():
+        artefact_source = source / "data" / "models" / source_name
+        if not (artefact_source.is_dir() and any(artefact_source.iterdir())):
+            report["missing"].append(f"data/models/{source_name}")
+            continue
         entries = install_tree(
-            classification_source,
-            models_dir / "classification",
+            artefact_source,
+            models_dir / target_name,
             force=force,
             dry_run=dry_run,
             logger=logger,
         )
         report["installed"].extend(entries)
-        # The application's default artefact directory is <data-dir>/models/classification, so no
-        # environment variable is needed; recording it makes the default explicit.
-        report["environment"]["BRAIN_CLASSIFIER_DIR"] = str((models_dir / "classification").resolve())
-        root = models_dir / "classification"
+        root = models_dir / target_name
         versions = set()
         for item in entries:
             destination = item.get("destination")
@@ -194,9 +215,11 @@ def build_report(source: Path, data_dir: Path, *, force: bool, dry_run: bool, lo
                 versions.add(Path(destination).relative_to(root).parts[0])
             except (ValueError, IndexError):
                 continue
-        report["classification_versions"] = sorted(versions)
-    else:
-        report["missing"].append("data/models/classification")
+        report[f"{target_name}_versions"] = sorted(versions)
+        if target_name == "classification":
+            # The application's default artefact directory is <data-dir>/models/classification, so
+            # no environment variable is needed; recording it makes the default explicit.
+            report["environment"]["BRAIN_CLASSIFIER_DIR"] = str(root.resolve())
 
     reports_source = source / "reports"
     if reports_source.is_dir() and any(reports_source.iterdir()):
@@ -207,19 +230,49 @@ def build_report(source: Path, data_dir: Path, *, force: bool, dry_run: bool, lo
     provenance_path = source / "data" / "models" / "artifacts_manifest.json"
     if provenance_path.exists():
         provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        classification_dataset = provenance.get("classification_dataset") or {}
         report["provenance"] = {
             "produced_by": provenance.get("produced_by"),
             "generated_at": provenance.get("generated_at"),
             "synthetic": (provenance.get("dataset") or {}).get("synthetic"),
+            "dataset": {
+                "name": (provenance.get("dataset") or {}).get("name"),
+                "synthetic": (provenance.get("dataset") or {}).get("synthetic"),
+                "split_method": (provenance.get("dataset") or {}).get("split_method"),
+            },
+            "classification_dataset": {
+                "name": classification_dataset.get("name"),
+                "synthetic": classification_dataset.get("synthetic"),
+                "classes": classification_dataset.get("classes"),
+                "split_source": classification_dataset.get("split_source"),
+            },
             "models": {
                 model_id: {
                     "state": entry.get("state"),
+                    "task": entry.get("task", "segmentation"),
                     "trained_on": entry.get("trained_on"),
                     "evaluated_on": entry.get("evaluated_on"),
+                    "classes": entry.get("classes"),
                 }
                 for model_id, entry in (provenance.get("models") or {}).items()
             },
         }
+
+    index_path = source / "data" / "models" / "models_index.json"
+    if index_path.exists():
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        report["artefacts"] = [
+            {
+                "name": item.get("name"),
+                "task": item.get("task"),
+                "label_space": item.get("label_space"),
+                "dataset": item.get("dataset"),
+                "dataset_synthetic": item.get("dataset_synthetic"),
+                "state": item.get("state"),
+                "served_by_application": item.get("served_by_application"),
+            }
+            for item in (index.get("artefacts") or [])
+        ]
     return report
 
 
@@ -256,6 +309,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    if report.get("artefacts"):
+        logger.info("")
+        logger.info("%-28s | %-26s | %-38s | %s", "artefact", "task", "label space", "served by the API")
+        for item in report["artefacts"]:
+            logger.info(
+                "%-28s | %-26s | %-38s | %s",
+                item["name"],
+                item["task"],
+                item["label_space"],
+                "yes" if item["served_by_application"] else "no",
+            )
 
     logger.info("")
     logger.info("%-42s | %-17s | %s", "file", "state", "destination")

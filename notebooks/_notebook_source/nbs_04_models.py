@@ -1,4 +1,4 @@
-# %% [cell] 13. SegNet training / retraining (4-channel)
+# %% [cell] 18. SegNet training / retraining (4-channel)
 # =============================================================================
 # SECTION 11b - SegNet
 # =============================================================================
@@ -71,7 +71,7 @@ if not RUN.get("skip_segnet_training", False):
 else:
     print("skip_segnet_training = True -> not training SegNet in this session")
 
-# %% [cell] 14. U-Net baseline (single-channel 512x512)
+# %% [cell] 19. U-Net baseline (single-channel 512x512)
 # =============================================================================
 # SECTION 12 - U-Net baseline on real data
 # =============================================================================
@@ -137,7 +137,7 @@ if not RUN.get("skip_unet_training", False):
 else:
     print("skip_unet_training = True -> not training the U-Net in this session")
 
-# %% [cell] 15. Residual Attention U-Net (RAUNet, 4-channel)
+# %% [cell] 20. Residual Attention U-Net (RAUNet, 4-channel)
 # =============================================================================
 # SECTION 13 - RAUNet (residual attention U-Net with deep supervision)
 # =============================================================================
@@ -202,7 +202,7 @@ if not RUN.get("skip_raunet_training", False):
 else:
     print("skip_raunet_training = True -> not training RAUNet in this session")
 
-# %% [cell] 16. Training curves
+# %% [cell] 21. Training curves
 # =============================================================================
 # Loss and validation curves for every model trained above
 # =============================================================================

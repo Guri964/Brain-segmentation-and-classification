@@ -7,11 +7,11 @@ Three things are verified here, all without a GPU and without BraTS data:
    `backend/app/**` (so a checkpoint trained in the notebook uses exactly the architectures,
    loss, metrics and radiomics extractor the API uses).
 
-2. **Executability.** The notebook's own cells are executed in order against the synthetic
-   fixture (`scripts/make_brats_fixture.py`) in smoke mode: preprocessing, splits, trainer,
-   radiomics feature tables, classifiers, ensemble calibration, held-out evaluation, XAI,
-   artefact export and the compatibility check all run for real. A notebook that only looks
-   right would fail these tests.
+2. **Executability.** The notebook's own cells are executed in order against both synthetic
+   fixtures (`scripts/make_brats_fixture.py` for segmentation, `scripts/make_classification_fixture.py`
+   for the multiclass task) in smoke mode: preprocessing, splits, trainer, radiomics feature
+   tables, classifiers, ensemble calibration, held-out evaluation, XAI, artefact export and the
+   compatibility check all run for real. A notebook that only looks right would fail these tests.
 
 3. **Servability.** The exported classification directory is opened with the real
    `ClassificationService`, and the exported checkpoints with the real `ModelRegistry`, to
@@ -53,8 +53,14 @@ REQUIRED_SECTIONS = [
     "RAUNET TRAINING",
     "CLASSIFICATION FEATURES",
     "CLASSIFICATION (patient-level split",
+    "CLASSIFICATION DATASET",
     "Image-based classifier",
     "Radiomics quality",
+    "MULTICLASS DATASET",
+    "MULTICLASS CNN",
+    "RADIOMICS CLASSIFIERS",
+    "STACKED ENSEMBLE",
+    "MULTICLASS EVALUATION",
     "ENSEMBLE",
     "MODEL SELECTION",
     "HELD-OUT TEST RESULTS",
@@ -163,6 +169,7 @@ def notebook_namespace(tmp_path_factory):
 
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
     from make_brats_fixture import main as fixture_main
+    from make_classification_fixture import main as classification_fixture_main
 
     workdir = tmp_path_factory.mktemp("kaggle-run")
     fixture_root = workdir / "brats_fixture"
@@ -173,6 +180,22 @@ def notebook_namespace(tmp_path_factory):
                 "--volumes", "8",
                 "--slices-per-volume", "3",
                 "--empty-every", "4",
+            ]
+        )
+        == 0
+    )
+
+    # Second dataset: the image-classification fixture stands in for the Brain Tumor MRI Dataset,
+    # with the same directory shape (Training/<class>, Testing/<class>) and a marker that says it
+    # is synthetic, so the notebook has to record `synthetic: true` next to every artefact.
+    classification_fixture = workdir / "classification_fixture"
+    assert (
+        classification_fixture_main(
+            [
+                "--out", str(classification_fixture),
+                "--train-per-class", "6",
+                "--test-per-class", "4",
+                "--size", "72",
             ]
         )
         == 0
@@ -204,6 +227,7 @@ def notebook_namespace(tmp_path_factory):
                 # the notebook created its work directories: point it at the fixture instead of
                 # scanning /kaggle/input, and make the run small so the test stays fast.
                 namespace["RUN"]["dataset_roots"] = [str(fixture_root)]
+                namespace["RUN"]["classification_dataset_roots"] = [str(classification_fixture)]
                 namespace["RUN"]["smoke_test"] = True
                 namespace["apply_smoke_overrides"]()
             if "TRAIN_PATIENTS, VAL_PATIENTS, TEST_PATIENTS = TRAIN_PATIENTS" in source:
@@ -380,6 +404,141 @@ def test_notebook_runs_end_to_end(notebook_namespace):
     # nothing the repository ships may be named like an export target
     for name in ("segnet_model.pth", "raunet_brats_4ch.pt", "UNet-[16, 32, 64, 128, 256].pt"):
         assert not (export_root / name).exists(), f"the export must not shadow {name}"
+
+
+def test_classification_dataset_discovery_reports_a_missing_dataset(notebook_namespace):
+    """A missing second dataset is reported, never substituted -- and does not crash the run."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as empty:
+        result = notebook_namespace["discover_classification_dataset"]([empty])
+    assert result["found"] is False
+    assert result["searched"] == [empty]
+    assert "brain-tumor-mri-dataset" in result["hint"]
+    # the function that decides what the data *is* keeps three distinguishable answers
+    resolve = notebook_namespace["resolve_classification_provenance"]
+    assert resolve("auto", {"synthetic": True}, 40, ["a", "b"])[0] is True
+    assert resolve("auto", None, 7200, ["a", "b", "c", "d"])[0] is False
+    assert resolve("auto", None, 40, ["a", "b"])[0] is None
+    assert resolve("real", None, 10, ["a", "b"])[0] is False
+
+
+def test_multiclass_dataset_is_read_from_its_own_directories(notebook_namespace):
+    """Classes and counts come from the tree on disk, not from an assumption about the dataset."""
+    assert notebook_namespace["CLASSIFICATION_IMAGES_AVAILABLE"] is True
+    classes = notebook_namespace["CLASSIFICATION_CLASSES"]
+    assert classes == ["glioma", "meningioma", "notumor", "pituitary"], classes
+
+    structure = json.loads(
+        (Path(notebook_namespace["PATHS"]["work"]) / "artifacts" / "classification_structure.json").read_text()
+    )
+    assert structure["state"] == "inspected"
+    assert structure["class_counts"] == {name: 10 for name in classes}
+    assert structure["extensions"] == {".png": 40}
+    assert structure["modes"] == {"L": 40}
+    assert structure["synthetic"] is True, "the fixture marker must be detected"
+    assert "not substituted" not in structure["provenance_note"]
+
+    splits = notebook_namespace["CLASSIFICATION_SPLIT_RECORD"]
+    assert splits["split_source"].startswith("the dataset's own")
+    assert splits["splits"]["train"] == {name: 4 for name in classes}
+    assert splits["splits"]["test"] == {name: 4 for name in classes}
+    assert splits["splits"]["validation"] == {name: 2 for name in classes}
+
+
+def test_leakage_audit_measures_before_it_removes(notebook_namespace):
+    """The audit reports candidates and confirmations separately, and cannot gut a split."""
+    audit = notebook_namespace["CLASSIFICATION_AUDIT"]
+    assert audit["state"] in {"measured", "measured_and_enforced"}
+    assert audit["patient_identifiers_available"] is False
+    assert audit["patient_level_split_possible"] is False
+    for split_name in ("validation", "test"):
+        entry = audit["split_audits"][split_name]
+        assert entry["images_before"] > 0
+        assert entry["images_after"] == entry["images_before"] - len(entry["excluded"])
+        assert entry["hash_candidates"] >= entry["confirmed_near_duplicates"]
+        # the fixtures are distinct images: nothing may be removed from the evaluation splits
+        assert entry["confirmed_near_duplicates"] == 0, entry["examples"]
+    # the guard exists: a rule that would remove more than the allowed share is refused
+    assert audit["max_exclusion_fraction"] <= 0.2
+
+
+def test_multiclass_artefacts_are_exported_with_task_and_dataset(notebook_namespace):
+    workdir = Path(notebook_namespace["PATHS"]["work"])
+    export_root = workdir / "brain_mri_artifacts"
+
+    # the CNN checkpoint and the stacking ensemble
+    assert (export_root / "checkpoints" / "brain_tumor_mri_cnn.pt").exists()
+    artefact_dirs = list((export_root / "data" / "models" / "classification_multiclass").glob("*/manifest.json"))
+    assert len(artefact_dirs) == 1, artefact_dirs
+    manifest = json.loads(artefact_dirs[0].read_text())
+    assert manifest["task"] == "multiclass_classification"
+    assert manifest["classes"] == notebook_namespace["CLASSIFICATION_CLASSES"]
+    assert manifest["dataset"]["synthetic"] is True
+    assert manifest["feature_schema"] == notebook_namespace["MULTICLASS_FEATURE_NAMES"]
+    preprocessing = manifest["provenance_contract"]["preprocessing"]
+    assert preprocessing["fit_on"] == "training split only"
+    assert len(preprocessing["mean"]) == len(manifest["feature_schema"])
+    assert len(preprocessing["scale"]) == len(manifest["feature_schema"])
+    assert manifest["selected_model"] == "stacked_logistic_regression"
+    for name in ("stacked_logistic_regression", "simple_average", "cnn"):
+        assert name in manifest["metrics"], f"{name} has no recorded metrics"
+        assert manifest["metrics"][name]["samples"] > 0
+    assert (artefact_dirs[0].parent / "stacked_ensemble.joblib").exists()
+
+    # every exported artefact is identifiable by task, label space and dataset
+    index = json.loads((export_root / "data" / "models" / "models_index.json").read_text())
+    by_name = {entry["name"]: entry for entry in index["artefacts"]}
+    assert by_name["brain_tumor_mri_classifier"]["task"] == "multiclass_classification"
+    assert by_name["brain_tumor_mri_classifier"]["dataset_synthetic"] is True
+    assert by_name["brain_tumor_mri_classifier"]["served_by_application"] is False
+    assert by_name["segnet_brats_4ch"]["task"] == "segmentation"
+    assert by_name["radiomics_grade_classifier"]["task"] == "classification"
+    assert "HGG" in by_name["radiomics_grade_classifier"]["label_space"]
+    assert "glioma" in by_name["brain_tumor_mri_cnn"]["label_space"]
+
+
+def test_stacked_ensemble_refuses_incompatible_members(notebook_namespace):
+    """Members from another dataset/label space are rejected, with the reason recorded."""
+    stack = notebook_namespace["MULTICLASS_STACK_RESULT"]
+    assert stack["state"] == "fitted_and_evaluated"
+    rejected = {entry["name"]: entry["reason"] for entry in stack["rejections"]}
+    assert "brats_hgg_lgg_classifier" in rejected
+    reason = rejected["brats_hgg_lgg_classifier"]
+    assert "label space differs" in reason and "dataset differs" in reason
+    # the BraTS grade model is never a member
+    assert "brats_hgg_lgg_classifier" not in stack["members"]
+    assert stack["test_split_used_for_tuning"] is False
+    assert stack["selection_split"] == "validation"
+    # superiority is claimed only when the measured numbers support it
+    stacked = stack["comparison"]["stacked_logistic_regression"]["test"]["macro_f1"]
+    best = stack["comparison"][stack["best_single_member"]]["test"]["macro_f1"]
+    assert abs(stack["stacked_minus_best_single_macro_f1"] - (stacked - best)) < 1e-9
+    if stacked <= best:
+        assert "not better" in stack["statement"] or "not an improvement" in stack["statement"]
+
+
+def test_multiclass_evaluation_is_on_a_held_out_split(notebook_namespace):
+    workdir = Path(notebook_namespace["PATHS"]["work"])
+    evaluation = json.loads((workdir / "artifacts" / "classification_multiclass_evaluation.json").read_text())
+    assert evaluation["state"] == "evaluated"
+    protocol = evaluation["protocol"]
+    assert protocol["selection_split"] == "validation"
+    assert protocol["test_split_used_for_tuning"] is False
+    assert protocol["patient_level_split_possible"] is False
+    assert evaluation["dataset"]["synthetic"] is True
+    assert evaluation["dataset"]["classes"] == notebook_namespace["CLASSIFICATION_CLASSES"]
+    metrics = evaluation["models"]["stacked_logistic_regression"]
+    for key in ("accuracy", "macro_f1", "weighted_f1", "macro_precision", "macro_recall", "per_class", "confusion_matrix"):
+        assert key in metrics, key
+    assert 0.0 <= metrics["accuracy"] <= 1.0
+    assert 0.0 <= metrics["macro_f1"] <= 1.0
+    assert len(metrics["per_class"]) == len(notebook_namespace["CLASSIFICATION_CLASSES"])
+    assert metrics["samples"] > 0
+    # the honest limits travel with the numbers
+    caveats = " ".join(evaluation["caveats"]).lower()
+    assert "not a malignancy" in caveats
+    assert "patient identifiers" in caveats
 
 
 def test_predicted_mask_features_and_quality_report(notebook_namespace):
