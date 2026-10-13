@@ -267,6 +267,49 @@ work for a quick check.
 
 ---
 
+## 5.3 When training is slow, or the GPU sits at 0%
+
+If the notebook reports `batch preparation` in seconds rather than milliseconds, the cache on
+disk is in the compressed `.npz` layout. Every single slice read then inflates that patient's
+whole archive (165 MiB for a real BraTS volume), and the slice index does the same once per
+patient per epoch. Cell 9 measures both layouts on your own data and prints the difference; it
+is not an estimate.
+
+What cell 9 does about it:
+
+| Step | What happens |
+|---|---|
+| Build | New caches are written as `cache/<volume>.cache/{images,masks,singles}.npy` (memory-mappable: reading slice *i* reads slice *i*) |
+| Measure | Before converting, it times the archive reader and the store on the same four volumes and the same slices, and writes `artifacts/cache_io_benchmark.json` |
+| Convert | `upgrade_patient_cache()` converts an existing `.npz` cache in place: write `.part`, read it back, compare every value, publish, then delete the archive. One patient at a time, resumable, and a volume that fails keeps its archive and is reported |
+| Index | `cache/_cache_index.json` records slice counts so the per-epoch index costs header reads instead of payload loads |
+| Verify | `validate_cache()` re-reads a slice from each sampled volume and checks the shape, dtype, finiteness and the mask's binary contract |
+
+Knobs (cell 2, `RUN`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `cache_format` | `"memmap"` | Layout for newly built cache entries; `"npz"` writes the old compressed archive |
+| `upgrade_cache_to_memmap` | `True` | Convert existing archives during cell 9 (set `False` to keep them and stay slow) |
+| `patient_cache_mb` | `1536` | Upper bound on materialised payloads held in RAM |
+| `patient_cache_handles` | `32` | Upper bound on open memory maps |
+| `prefetch_batches` | `False` | Prepare the next batch on a worker thread. Measured slower than direct reads here (12.2-13.1 ms vs 10.0-11.3 ms per batch of 8), so it is off |
+| `benchmark_before_training` | `True` | Run the one-batch checks and the five-phase benchmark before the first epoch |
+| `benchmark_steps` / `benchmark_warmup` | `6` / `2` | Steps measured (after the warm-up) in that benchmark |
+
+Cell 18 prints the result: batch preparation, CPU->GPU transfer, forward, backward+optimiser
+step and the whole step, separately, with `torch.cuda.synchronize()` around the GPU phases and
+a real `nvidia-smi` utilisation sample. The five phases are also written to
+`artifacts/segnet_benchmark.json`; the pre-training checks (shapes, dtypes, finite loss, real
+gradients, checkpoint round-trip) go to `artifacts/segnet_self_test.json`.
+
+Disk cost of the conversion: the memory-mappable layout is about 20% larger than the
+compressed one (measured 165 MiB vs 138 MiB per BraTS volume). Cell 9 prints free space, the
+measured size per volume and what the full 369-volume release would need before it starts, and
+skips a volume it cannot fit (reported, never silently).
+
+---
+
 ## 6. Troubleshooting
 
 | Symptom | Cause and fix |
@@ -280,6 +323,7 @@ work for a quick check.
 | Upload rejected as duplicate channels | Four-channel analyses need four *different* sequences; the API reports which ones matched |
 | Blank page after `npm run build` | The build output must exist at `frontend/dist`; run the build from inside `frontend/` |
 | Slow inference | Two CPU threads are the default. Raise `BRAIN_TORCH_THREADS`, or use a GPU |
+| Notebook: GPU at 0%, `batch preparation` in seconds | The cache is in the compressed `.npz` layout. See §5.3: rebuild or let cell 9 convert it to the memory-mappable layout |
 | `PyRadiomics unavailable` in the log | Expected on Python 3.11+. The native extractor is used and reported |
 | PDF is missing for an old analysis | Regenerate it from the Reports page; the payload is still stored |
 

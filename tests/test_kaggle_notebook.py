@@ -45,9 +45,13 @@ REQUIRED_SECTIONS = [
     "MRI visualisation",
     "mask visualisation",
     "preprocessing",
+    "CACHE READ BENCHMARK",
+    "memory-mappable",
     "SPLITS",
     "baselines",
     "Trainer",
+    "Measuring the pipeline",
+    "PRE-TRAINING CHECKS",
     "SEGNET TRAINING",
     "U-NET TRAINING",
     "RAUNET TRAINING",
@@ -269,8 +273,68 @@ def test_notebook_runs_end_to_end(notebook_namespace):
     assert namespace["SPLIT_SUMMARY"]["leakage_free"] is True
     assert namespace["SPLIT_SUMMARY"]["patients_assigned"] == namespace["SPLIT_SUMMARY"]["patients_total"]
     assert namespace["SPLIT_SUMMARY"]["patient_overlap"] == []
-    cached = sorted((workdir / "cache").glob("*.npz"))
+    cached = namespace["cached_volumes"]()
     assert len(cached) == namespace["SPLIT_SUMMARY"]["patients_total"]
+    # every patient is in the memory-mappable layout, and nothing ever inflates an archive
+    assert all(namespace["cache_layout"](key) == "npy" for key in cached)
+    assert not list((workdir / "cache").glob("*.npz")), "the archive layout is not written by default"
+    assert namespace["PATIENT_STORE"].stats["archive_reads"] == 0, (
+        "an .npz member was inflated during the run; the pipeline must read memory maps"
+    )
+
+    # --- the data pipeline reports its own measurements ---------------------
+    cache_io = json.loads((workdir / "artifacts" / "cache_io_benchmark.json").read_text(encoding="utf-8"))
+    assert cache_io["after"]["batch_seconds_per_slice"] is not None
+    assert cache_io["after"]["batch_seconds_per_slice"] >= 0
+    assert cache_io["after"]["legacy_measured"] is False, "this run had no archive left to measure"
+    assert cache_io["sample"], "the benchmark must name the volumes it measured"
+    for key in ("member_reads", "archive_reads", "slices_returned", "evictions"):
+        assert key in cache_io["after"]["store"], f"the store report is missing {key}"
+    # the same patient IDs are used before and after a conversion, never a fresh sample
+    if cache_io["before"]:
+        assert cache_io["before"]["volumes"] == cache_io["after"]["volumes"]
+    assert (workdir / "artifacts" / "segnet_benchmark.json").exists()
+    benchmark = json.loads((workdir / "artifacts" / "segnet_benchmark.json").read_text(encoding="utf-8"))
+    for phase in ("prepare", "cpu_to_gpu", "forward", "backward_and_step", "step_total"):
+        entry = benchmark["phases_seconds"][phase]
+        assert entry["n"] >= 1, f"{phase} was not measured"
+        assert entry["median"] is not None and entry["median"] >= 0
+    assert benchmark["first_batch_seconds"] is not None
+    assert benchmark["steps_measured"] >= 1
+    assert benchmark["amp"] == namespace["AMP_ENABLED"]
+    assert benchmark["model_id"] == "segnet_brats_4ch"
+    # measured on a copy of the model: the real training state is untouched
+    assert any("copy of the model" in note for note in benchmark["notes"])
+
+    # --- the one-batch pre-flight check passed for real ---------------------
+    self_test = json.loads((workdir / "artifacts" / "segnet_self_test.json").read_text(encoding="utf-8"))
+    assert self_test["loss_finite"] is True
+    assert self_test["gradients_finite"] is True and self_test["gradients_nonzero"] is True
+    assert self_test["images_finite"] is True and self_test["masks_binary"] is True
+    assert self_test["images_shape"][1] == 4, "4 channels: T1, T1ce, T2, FLAIR"
+    assert self_test["checkpoint_reload_ok"] is True
+    for key in ("state_dict", "optimizer", "scheduler", "epoch", "step", "best_dice", "numpy_rng", "torch_rng"):
+        assert key in self_test["checkpoint_keys"]
+    # the self test writes to work/selftest, never into a model's checkpoint directory
+    assert "selftest" in self_test["checkpoint_path"]
+    assert Path(self_test["checkpoint_path"]).exists()
+
+    # --- batching is patient-wise and unchanged -----------------------------
+    batching = namespace["iterate_batches"]
+    patients = namespace["SPLITS"]["train"][:3]
+    if patients:
+        reference = list(
+            batching(patients, batch_size=4, size=namespace["RUN"]["image_size"], shuffle=True,
+                     rng=namespace["np"].random.default_rng(11), max_steps=2, legacy=True)
+        )
+        optimised = list(
+            batching(patients, batch_size=4, size=namespace["RUN"]["image_size"], shuffle=True,
+                     rng=namespace["np"].random.default_rng(11), max_steps=2)
+        )
+        assert len(reference) == len(optimised) >= 1
+        for before, after in zip(reference, optimised):
+            assert namespace["np"].array_equal(before[0], after[0])
+            assert namespace["np"].array_equal(before[1], after[1])
 
     # --- training produced resumable checkpoints ---------------------------
     for model_id in ("segnet_brats_4ch", "raunet_brats_4ch", "unet_dynamic_512_real_brats"):

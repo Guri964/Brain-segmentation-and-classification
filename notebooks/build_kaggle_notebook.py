@@ -153,6 +153,32 @@ Verified context for this notebook (see `docs/DELIVERY.md`):
 What each part produces is recorded next to it: every artefact carries its task, its dataset and
 whether that dataset is real or a fixture, and `data/models/models_index.json` lists all of them.
 
+## The data pipeline (why training is not CPU-bound)
+
+Training reads a per-patient cache. That cache exists in two layouts, and the difference is
+measured in cell 9 rather than assumed:
+
+* **`memmap`** (default) -- `cache/<volume>.cache/{images,masks,singles}.npy`, one
+  memory-mappable file per member: reading slice *i* reads slice *i*.
+* **`npz`** (legacy) -- `cache/<volume>.npz`, a `savez_compressed` archive. Opening any member
+  inflates that whole member, so reading one slice of one real BraTS volume means decompressing
+  images + masks + singles (165 MiB).
+
+The trainer reads through a bounded payload store: one read per patient per batch rather than one
+per slice, only the members a batch needs (a 4-channel batch never opens the 512x512
+single-channel member), slice counts from a `.npy` header instead of a payload load, and bounded
+memory (`patient_cache_mb`, `patient_cache_handles`). An existing `.npz` cache is converted in
+place by `upgrade_patient_cache()` -- written as `.part`, read back, compared value by value,
+published, and only then is the archive deleted; a volume that fails keeps its archive and is
+reported. Cell 18 then prints the five phases of a real training step (preparation, CPU->GPU
+transfer, forward, backward + optimiser step, and the whole step) with
+`torch.cuda.synchronize()` around the GPU phases and a real `nvidia-smi` utilisation sample.
+
+Nothing about the model, the loss, the optimiser, the schedule, the checkpoints, the splits or the
+normalisation changed: the test suite asserts that the new reader yields batches that are
+bit-for-bit identical to the implementation it replaced. `docs/DELIVERY.md` §K has the measured
+root cause and the before/after numbers.
+
 ## How to run it
 
 1. **Settings -> Accelerator -> GPU T4 x2** (or any CUDA GPU). Cell 1 verifies the device and
@@ -198,6 +224,10 @@ the batch size. Measure it on your first run instead of trusting a guess -- the 
 Set `RUN["max_steps_per_epoch"]` to time-box an epoch (the index is reshuffled every epoch, so a
 capped epoch still sees different slices). `RUN["session_budget_minutes"]` stops training cleanly
 before Kaggle ends the session, so the next session resumes instead of losing the work.
+
+Cell 18 prints what a step actually costs before the epoch loop starts, and the first thing to
+check is `batch preparation`: it is milliseconds when the cache is memory-mappable and seconds
+when it is still compressed (see "The data pipeline" above -- cell 9 reports and converts it).
 
 ## Resume
 

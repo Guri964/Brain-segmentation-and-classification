@@ -149,7 +149,22 @@ RUN = {
     "validate_every_epochs": 1,
     "validation_cases": 64,      # patient-level validation cases per validation pass
     "grad_clip": 1.0,
-    "num_workers": 2,
+    "num_workers": 2,          # unused: this pipeline feeds the GPU from cached arrays (see cell 17)
+    # --- cached-array data pipeline ----------------------------------------
+    # "memmap" writes one memory-mappable .npy per member (reading slice i reads slice i);
+    # "npz" writes the older compressed archive (any access inflates the whole member).
+    "cache_format": "memmap",
+    "upgrade_cache_to_memmap": True,   # convert an existing .npz cache in place, verified per patient
+    "patient_cache_mb": 1536,          # bound on materialised payloads held in RAM
+    "patient_cache_handles": 32,       # bound on simultaneously open memory maps
+    "prefetch_batches": False,         # prepare the next batch on a worker thread (measured, see cell 18)
+    "benchmark_before_training": True,
+    "benchmark_steps": 6,
+    "benchmark_warmup": 2,
+    # Set True to also measure the OLD per-slice reader at step level. It reads a whole
+    # payload per slice, so it costs minutes on a full split; the cache-level before/after
+    # in cell 9 is measured on the real archives instead, for free.
+    "benchmark_legacy_pipeline": False,
     # --- time budget -------------------------------------------------------
     "session_budget_minutes": 480,   # stop cleanly before the Kaggle session ends
     "checkpoint_every_steps": 500,
@@ -245,6 +260,11 @@ SMOKE_OVERRIDES = {
     "image_classifier_slices_per_patient": 2,
     "radiomics_slices_per_patient": 1,
     "session_budget_minutes": 30,
+    "benchmark_steps": 2,
+    "benchmark_warmup": 0,
+    "batch_size": 8,           # the fixture has few slices; 8 keeps at least two batches
+    "patient_cache_mb": 256,
+    "patient_cache_handles": 8,
 }
 
 

@@ -258,7 +258,7 @@ summary, because the fixture labels and masks are synthetic.
 
 | Command | Result |
 | --- | --- |
-| `/home/user/.venv/bin/python -m pytest tests -q` | **121 passed** in 120 s (CPU only) |
+| `/home/user/.venv/bin/python -m pytest tests -q` | **142 passed** in 110 s (CPU only) |
 | `cd frontend && npx tsc --noEmit` | **0 errors** under `strict`, `noUnusedLocals`, `noUnusedParameters` |
 | `cd frontend && npm run build` | Success: 880.60 kB JavaScript (250.08 kB gzipped), 38.36 kB CSS |
 | `git status --porcelain` | clean after commit |
@@ -278,7 +278,10 @@ classes), the artefact installer (never overwriting shipped files, backing up be
 installing the second dataset's artefacts and labelling each one with its task and dataset), and
 the training provenance rules (a fixture-trained model is never reported as trained on real data,
 absent provenance is its own state rather than an assumption, and the shipped legacy classifier
-does not inherit the trained classifier's provenance).
+does not inherit the trained classifier's provenance), and the cached-array data pipeline
+(`tests/test_data_pipeline.py`: bit-for-bit equality with the replaced reader, reads counted per
+patient rather than per slice, no archive inflation anywhere, bounded byte budget and handle cap,
+publish-last writes, and a conversion that never deletes an archive it could not verify).
 
 ## I. Setup
 
@@ -287,7 +290,7 @@ python -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt          # add requirements-dev.txt for tests
 .venv/bin/python scripts/setup_env.py                      # environment report
 .venv/bin/python scripts/check_models.py                   # reference verification of the checkpoints
-.venv/bin/python -m pytest tests -q                        # 121 tests
+.venv/bin/python -m pytest tests -q                        # 142 tests
 
 cd frontend && npm install && npm run build && cd ..
 .venv/bin/python backend/run.py                            # http://127.0.0.1:5000
@@ -336,3 +339,102 @@ verified on CPU. Full details, environment variables and troubleshooting: `HOW_T
     from running that notebook; none is claimed here.
 13. This is a research prototype. Outputs are AI-generated and are not intended to replace
     professional medical diagnosis.
+
+## K. Data pipeline: the CPU bottleneck, measured
+
+### K.1 The diagnosis
+
+`iterate_batches()` called `load_patient()` **once per patient** (to learn how many slices it
+has) and **once per slice** (to build the batch). Each call opened the patient's
+`savez_compressed` archive and read five members out of it -- `images`, `masks`, `singles`,
+`grade`, `slices` -- so it paid for a full 165 MiB decompression (images 81 MiB + singles
+81 MiB + masks 10 MiB) to look at one 256x256 slice. Nothing else was involved: no PIL, no
+filesystem search, no GPU work.
+
+Measured on a 12-volume cache of realistic payloads (155 slices per volume, 4-channel
+256x256 fp16 images, 512x512 fp16 single-channel arrays):
+
+| Measurement | Value |
+| --- | --- |
+| one full payload load (`load_patient`) | 0.93 s |
+| one 4-channel slice read, archive layout | 0.44-0.51 s |
+| slice count from the `.npy` header instead | 0.09-0.32 ms |
+| `load_patient()` calls for one batch of 8 | **20** = 12 patients (index) + 8 slices |
+| first `next(iterate_batches(...))` | 19.8 s, of which 19.75 s (100%) inside `load_patient` |
+| `cProfile` of that call | 20 payload loads -> 100 member reads -> **13,620 `zipfile.read` calls**, 19.4 s in deflate |
+| steady-state batch of 8 (no index build) | 7.7 s |
+
+The cost is exactly linear in the number of payload loads (20 loads -> 19.8 s, 8 loads ->
+7.7 s), which is why the reported "109.698 s for one batch of 8" is an *index-plus-batch*
+measurement: 369 patients + 8 slices = 377 payload loads. At the reporter's measured
+0.29 s per load that is 109 s; at 0.41 s it is 155 s. Both land on the reported figure, and
+the profile attributes all of it to compression, not to the model, the device or the copy.
+
+The GPU was idle because of arithmetic, not configuration: a batch cost ~2.3 s of CPU
+preparation (steady state) against a 0.048 s T4 step, i.e. the GPU could be busy at most ~2%
+of the time while the CPU inflated zips. 369 volumes x 155 slices / 8 per batch = 7,149
+batches -- about 4.6 hours of CPU per epoch, every epoch, plus 107 s of index building again
+at the start of each one.
+
+### K.2 The fix
+
+1. **The slice count comes from a header, not from the payload.** Both cache layouts expose
+   the array shape in a `.npy` header, so the index is built with one header read per patient
+   and persisted to `cache/_cache_index.json`. The trainer rebuilds it every epoch for free.
+2. **One read per patient, not per slice.** `PATIENT_STORE` (a bounded store) opens each
+   member once per patient and indexes the slices a batch asks for. Members are read
+   selectively -- a 4-channel batch never opens `singles`, a single-channel batch never opens
+   `images` -- so half the payload is not even touched.
+3. **A memory-mappable cache layout.** `cache/<volume>.cache/{images,masks,singles}.npy` holds
+   one file per member, read through `np.load(..., mmap_mode="r")`: slice *i* reads slice *i*.
+   The old `.npz` layout is still readable, and `upgrade_patient_cache()` converts it in place
+   one patient at a time -- write `.part`, read it back and compare every value, publish, and
+   only then delete the archive. A failed conversion keeps the archive and is reported.
+4. **Bounded memory.** `patient_cache_mb` (default 1536) caps materialised payloads and
+   `patient_cache_handles` (default 32) caps open memory maps; nothing loads the dataset into
+   RAM. Both are asserted by tests.
+5. **A benchmark instead of an assumption** (`benchmark_data_pipeline`,
+   `benchmark_training_step`, called in cell 18 before the first epoch): preparation,
+   CPU->GPU transfer, forward, backward+step and the whole step are timed separately, with
+   `torch.cuda.synchronize()` on both sides of every GPU phase, plus a real `nvidia-smi`
+   utilisation sample. It runs on a copy of the model with a fresh optimiser, so the training
+   state is untouched.
+
+### K.3 Before and after, same cache, same volumes, same slices
+
+| Measurement (12 volumes x 155 slices, batch of 8) | Before | After |
+| --- | --- | --- |
+| slice read (archive vs memory map) | 511 ms | 0.230 ms (2,222x) |
+| preparation for a batch of 8 | 4,089 ms (8 x 511 ms) | **10.0-11.3 ms** (360-400x) |
+| index build, per patient | 1,046.8 ms | 0.017 ms (0.188 ms for the first probe) |
+| index build, 369 patients | ~389 s | ~6.6 ms |
+| payload loads for one batch of 8 + index | 20 (12 volumes) / 377 (369 volumes) | 0 |
+| `zipfile` member inflations during training | 100 per batch of 8 (12-volume set) | **0** |
+| prefetching on a worker thread | n/a | 12.2-13.1 ms vs 10.0-11.3 ms -> **not used** (slower in every run) |
+
+After the fix a batch of 8 slices costs ~10-11 ms of CPU on a 2-vCPU sandbox: opening the memory
+maps of 8 patients, reading 8 slices, converting fp16 -> fp32 and stacking ~8 MB. That is 18%
+of the reporter's measured 47.7 ms GPU step, so the GPU becomes the limiting factor instead of
+waiting 2.3 s per batch.
+
+### K.4 What is still slow, and what was deliberately not done
+
+* The remaining ~10-11 ms per batch is CPU assembly work (fp16 -> fp32 conversion plus
+  `np.stack` of 8 x 4 x 256 x 256), not I/O. Feeding fp16 straight to the GPU would move it to
+  the device but changes the arrays `iterate_batches` yields and the numerics every existing
+  checkpoint contract relies on, so it was **not** done.
+* The host-to-device copy is synchronous: `torch.from_numpy(...).to(device, non_blocking=True)`
+  only overlaps if the source memory is pinned, and it is not. With preparation at ~10-11 ms and
+  the transfer at ~3.4 ms, pinning plus prefetching is worth a few percent of a step; the
+  measured prefetch overhead (12.2-13.1 ms vs 10.0-11.3 ms) says the added complexity does not
+  pay here.
+* `DataLoader` workers were not used. The batches are memory-mapped page-cache reads with no
+  per-item Python work to parallelise; processes would add pickling of ~8 MB per batch plus
+  start-up, on a Kaggle container with 4 vCPUs that are all needed by the main process.
+* Disk: the memory-mappable layout is ~20% larger than the compressed one (165 MiB vs 138 MiB
+  per BraTS volume, measured), and the one-time conversion costs ~1.4 s per volume plus the
+  same disk space transiently. Cell 9 prints the free space and the measured size per volume
+  before it converts anything, and skips (reporting) any volume it cannot fit.
+* No GPU is available on this machine, so this section contains no GPU utilisation figure of
+  its own: the notebook prints the measured `nvidia-smi` utilisation and the
+  preparation/step ratio on the T4 run, which is where the claim has to be made.

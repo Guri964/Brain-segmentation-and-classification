@@ -529,10 +529,26 @@ print(f"figure saved: {PATHS['reports'] / '03_masks.png'}")
 #       single-channel   : intensity / max-style scaling to [0, 1]  (the shipped
 #                          U-Net contract is "image / 255")
 #   * store float16 arrays so the whole cache fits comfortably on the Kaggle disk.
-# The cache is written per patient and skipped when it already exists, so a
-# resumed session does not repeat this work.
+#
+# Two on-disk layouts, one reader. The difference is measured at the bottom of this cell,
+# not assumed:
+#
+#   "npy" (default)   cache/<volume>.cache/{images,masks,singles}.npy + meta.json
+#                     One memory-mappable file per member: reading slice i reads slice i.
+#   "npz" (legacy)    cache/<volume>.npz, a savez_compressed archive. ANY access to a
+#                     member inflates that whole member, so reading a single slice of a
+#                     real BraTS volume costs a full decompression of images + masks +
+#                     singles (165 MiB). A cache written by an earlier version of this
+#                     notebook still reads, and `upgrade_patient_cache()` converts it in
+#                     place -- verifying every array before it deletes anything.
+#
+# Both layouts are read through `load_patient()` and `PATIENT_STORE`, so every other
+# section of the notebook is layout-agnostic and an un-migrated cache still trains.
 # =============================================================================
 from PIL import Image as PILImage
+from collections import OrderedDict
+import shutil
+import zipfile
 
 
 def resize2d(array, size, nearest=False):
@@ -549,35 +565,6 @@ def zscore_channels(block):
     mean = float(block.mean())
     std = float(block.std()) or 1.0
     return (block - mean) / std
-
-
-def build_patient_cache(volume_key, entry, size, single_size, single_channel, force=False):
-    target = PATHS["cache"] / f"{volume_key}.npz"
-    if target.exists() and not force:
-        return {"volume": volume_key, "cached": True, "path": str(target)}
-    channels, singles, masks = [], [], []
-    for path in entry["slices"]:
-        image, whole = read_slice(path)
-        channels.append(zscore_channels(resize2d_channels(image, size)))
-        masks.append(resize2d(whole.astype(np.float32), size, nearest=True) > 0.5)
-        flair = image[..., single_channel] if image.shape[-1] > single_channel else image[..., 0]
-        pairs = single_pair(flair, single_size)
-        singles.append(pairs)
-    np.savez_compressed(
-        target,
-        images=np.stack(channels).astype(np.float16),
-        masks=np.stack(masks).astype(np.uint8),
-        singles=np.stack(singles).astype(np.float16),
-        grade=np.array([entry["grade"] or ""]),
-        slices=np.array([str(path) for path in entry["slices"]]),
-    )
-    return {
-        "volume": volume_key,
-        "cached": False,
-        "path": str(target),
-        "slices": len(masks),
-        "size_bytes": target.stat().st_size,
-    }
 
 
 def resize2d_channels(image, size):
@@ -599,6 +586,718 @@ def single_pair(flair, size):
     return scaled.astype(np.float32)
 
 
+class CacheError(RuntimeError):
+    pass
+
+
+# =============================================================================
+# Cache layout
+# =============================================================================
+CACHE_MEMBERS = ("images", "masks", "singles")
+MEMORY_MAP_FORMAT = "npy"
+ARCHIVE_FORMAT = "npz"
+CACHE_INDEX_NAME = "_cache_index.json"   # the underscore keeps it out of the patient namespace
+CACHE_DIRECTORY_SUFFIX = ".cache"
+
+
+def cache_archive(volume_key):
+    """The compressed single-file layout (what earlier versions of this notebook wrote)."""
+    return PATHS["cache"] / f"{volume_key}.npz"
+
+
+def cache_directory(volume_key):
+    """The memory-mappable per-patient layout."""
+    return PATHS["cache"] / f"{volume_key}{CACHE_DIRECTORY_SUFFIX}"
+
+
+def cache_member_path(volume_key, member):
+    return cache_directory(volume_key) / f"{member}.npy"
+
+
+def cache_meta_path(volume_key):
+    return cache_directory(volume_key) / "meta.json"
+
+
+def cache_layout(volume_key):
+    """`"npy"`, `"npz"` or None. The memory-mappable layout wins when both are present."""
+    if cache_member_path(volume_key, "images").exists() and cache_member_path(volume_key, "masks").exists():
+        return MEMORY_MAP_FORMAT
+    if cache_archive(volume_key).exists():
+        return ARCHIVE_FORMAT
+    return None
+
+
+def cache_entry_path(volume_key):
+    """Where this patient lives now."""
+    return cache_directory(volume_key) if cache_layout(volume_key) == MEMORY_MAP_FORMAT else cache_archive(volume_key)
+
+
+def cached_volumes():
+    """Every patient key present in the cache, whatever layout it is in."""
+    keys = set()
+    for path in PATHS["cache"].glob(f"*{CACHE_DIRECTORY_SUFFIX}"):
+        if path.is_dir():
+            keys.add(path.name[: -len(CACHE_DIRECTORY_SUFFIX)])
+    for path in PATHS["cache"].glob(f"*.{ARCHIVE_FORMAT}"):
+        keys.add(path.stem)
+    return sorted(keys)
+
+
+def round_mib(value):
+    return round(value / 1024 ** 2, 1)
+
+
+def layout_bytes(volume_key):
+    """What the cached payload of one patient costs on disk."""
+    layout = cache_layout(volume_key)
+    if layout == MEMORY_MAP_FORMAT:
+        return sum(path.stat().st_size for path in cache_directory(volume_key).glob("*.npy"))
+    if layout == ARCHIVE_FORMAT:
+        return cache_archive(volume_key).stat().st_size
+    return 0
+
+
+# =============================================================================
+# Slice counts without reading the arrays
+# =============================================================================
+# The old code learned how many slices a patient has by loading the whole payload:
+#
+#     for volume_key in patient_ids:
+#         payload = load_patient(volume_key)              # a whole archive inflation
+#         index.extend(... for position in range(payload["masks"].shape[0]))
+#
+# For the 369-volume BraTS 2020 release that is 369 archive inflations per epoch, for
+# training AND for every validation pass, to read one integer per patient. Both layouts
+# expose the shape in a header, so it costs a header read instead.
+
+
+def read_npy_header(path):
+    """(shape, dtype) of a .npy file, without reading its data."""
+    with open(path, "rb") as handle:
+        version = np.lib.format.read_magic(handle)
+        reader = np.lib.format.read_array_header_1_0 if version == (1, 0) else np.lib.format.read_array_header_2_0
+        shape, fortran_order, dtype = reader(handle)
+    return tuple(shape), np.dtype(dtype)
+
+
+def read_archive_member_header(path, member):
+    """(shape, dtype) of one member of an .npz archive, inflating only its header."""
+    with zipfile.ZipFile(path) as archive:
+        with archive.open(f"{member}.npy") as handle:
+            version = np.lib.format.read_magic(handle)
+            reader = np.lib.format.read_array_header_1_0 if version == (1, 0) else np.lib.format.read_array_header_2_0
+            shape, fortran_order, dtype = reader(handle)
+    return tuple(shape), np.dtype(dtype)
+
+
+def probe_patient(volume_key):
+    """Slice count, member shapes and dtypes of a cached patient. Touches headers only."""
+    layout = cache_layout(volume_key)
+    if layout is None:
+        return None
+    members = {}
+    if layout == MEMORY_MAP_FORMAT:
+        for member in CACHE_MEMBERS:
+            path = cache_member_path(volume_key, member)
+            if path.exists():
+                members[member] = read_npy_header(path)
+    else:
+        archive = cache_archive(volume_key)
+        with zipfile.ZipFile(archive) as handle:
+            available = set(handle.namelist())
+        for member in CACHE_MEMBERS:
+            if f"{member}.npy" in available:
+                members[member] = read_archive_member_header(archive, member)
+    if not members:
+        return None
+    return {
+        "volume": volume_key,
+        "layout": layout,
+        "slices": int(members.get("masks", members["images"])[0][0]),
+        "members": {member: list(shape) for member, (shape, _) in members.items()},
+        "dtypes": {member: str(dtype) for member, (_, dtype) in members.items()},
+        "bytes": layout_bytes(volume_key),
+    }
+
+
+CACHE_INDEX: dict = {}
+CACHE_INDEX_PATH = PATHS["cache"] / CACHE_INDEX_NAME
+CACHE_INDEX_PROBES = {"header_reads": 0, "arrays_read": 0}
+
+
+def load_cache_index(rebuild=False):
+    """Per-patient slice counts: from the index file, else one header read per patient."""
+    global CACHE_INDEX
+    if CACHE_INDEX and not rebuild:
+        return CACHE_INDEX
+    stored = read_json(CACHE_INDEX_PATH, default=None) or {}
+    entries = {}
+    for volume_key in cached_volumes():
+        entry = stored.get(volume_key)
+        if entry and entry.get("layout") == cache_layout(volume_key):
+            entries[volume_key] = entry
+            continue
+        probed = probe_patient(volume_key)
+        CACHE_INDEX_PROBES["header_reads"] += 1
+        if probed is not None:
+            entries[volume_key] = probed
+    CACHE_INDEX = entries
+    return CACHE_INDEX
+
+
+def write_cache_index():
+    write_json(CACHE_INDEX_PATH, {key: value for key, value in sorted(CACHE_INDEX.items())})
+    return CACHE_INDEX
+
+
+def cache_index_entry(volume_key, refresh=False):
+    if not CACHE_INDEX:
+        load_cache_index()
+    entry = CACHE_INDEX.get(volume_key)
+    if entry and not refresh and entry.get("layout") == cache_layout(volume_key):
+        return entry
+    probed = probe_patient(volume_key)
+    CACHE_INDEX_PROBES["header_reads"] += 1
+    if probed is not None:
+        CACHE_INDEX[volume_key] = probed
+    return probed
+
+
+def patient_slice_count(volume_key):
+    entry = cache_index_entry(volume_key)
+    if entry is None:
+        raise CacheError(f"{volume_key} is not cached; run the preprocessing cell first")
+    return int(entry["slices"])
+
+
+# =============================================================================
+# Writing the cache
+# =============================================================================
+def write_npy_part(path, array):
+    """Write `<path>.part` and return it. Nothing at `path` changes until it is published."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(path.name + ".part")
+    if part.exists():
+        part.unlink()
+    with open(part, "wb") as handle:
+        np.save(handle, array, allow_pickle=False)
+    return part
+
+
+def parts_of(volume_key):
+    return {member: cache_member_path(volume_key, member).with_name(f"{member}.npy.part") for member in CACHE_MEMBERS}
+
+
+def clean_parts(volume_key):
+    for part in parts_of(volume_key).values():
+        if part.exists():
+            part.unlink()
+
+
+def write_cache_members(volume_key, arrays, *, verify=True):
+    """Write every member of one patient, and only publish them once they are all complete.
+
+    `cache_layout()` reports this patient as cached as soon as `images.npy` and `masks.npy`
+    exist, so those two are published last: a session that dies (or a conversion that fails)
+    can leave `.part` files or a partial set behind, but it can never leave a cache that
+    looks complete while a member is missing. With `verify=True` every part file is read
+    back and compared value by value before it is published.
+    """
+    parts = {}
+    for member in ("singles", "masks", "images"):        # `images` is published last on purpose
+        if member in arrays:
+            parts[member] = write_npy_part(cache_member_path(volume_key, member), arrays[member])
+    if verify:
+        for member, part in parts.items():
+            written = np.load(part, mmap_mode="r")
+            same = (
+                written.shape == np.shape(arrays[member])
+                and written.dtype == np.asarray(arrays[member]).dtype
+                and np.array_equal(np.asarray(written), arrays[member])
+            )
+            del written
+            if not same:
+                clean_parts(volume_key)
+                raise CacheError(f"{volume_key}: the {member} member did not survive the write")
+    for member in ("singles", "masks", "images"):
+        if member in parts:
+            parts[member].replace(cache_member_path(volume_key, member))
+    return {member: cache_member_path(volume_key, member) for member in parts}
+
+
+def build_patient_cache(volume_key, entry, size, single_size, single_channel, force=False):
+    layout = cache_layout(volume_key)
+    if layout is not None and not force:
+        return {"volume": volume_key, "cached": True, "layout": layout, "path": str(cache_entry_path(volume_key))}
+    channels, singles, masks = [], [], []
+    for path in entry["slices"]:
+        image, whole = read_slice(path)
+        channels.append(zscore_channels(resize2d_channels(image, size)))
+        masks.append(resize2d(whole.astype(np.float32), size, nearest=True) > 0.5)
+        flair = image[..., single_channel] if image.shape[-1] > single_channel else image[..., 0]
+        pairs = single_pair(flair, single_size)
+        singles.append(pairs)
+    arrays = {
+        "images": np.stack(channels).astype(np.float16),
+        "masks": np.stack(masks).astype(np.uint8),
+        "singles": np.stack(singles).astype(np.float16),
+    }
+    slice_paths = [str(path) for path in entry["slices"]]
+    grade = entry["grade"] or ""
+
+    if RUN.get("cache_format", MEMORY_MAP_FORMAT) == ARCHIVE_FORMAT:
+        target = cache_archive(volume_key)
+        np.savez_compressed(target, grade=np.array([grade]), slices=np.array(slice_paths), **arrays)
+        written, layout = target, ARCHIVE_FORMAT
+    else:
+        try:
+            write_cache_members(volume_key, arrays)
+        except CacheError as exc:
+            return {"volume": volume_key, "cached": False, "layout": MEMORY_MAP_FORMAT, "error": str(exc)}
+        write_json(cache_meta_path(volume_key), {"volume": volume_key, "grade": grade, "slices": slice_paths})
+        written, layout = cache_directory(volume_key), MEMORY_MAP_FORMAT
+
+    CACHE_INDEX[volume_key] = {
+        "volume": volume_key,
+        "layout": layout,
+        "slices": len(masks),
+        "members": {member: list(array.shape) for member, array in arrays.items()},
+        "dtypes": {member: str(array.dtype) for member, array in arrays.items()},
+        "bytes": layout_bytes(volume_key),
+    }
+    return {
+        "volume": volume_key,
+        "cached": False,
+        "layout": layout,
+        "path": str(written),
+        "slices": len(masks),
+        "size_bytes": layout_bytes(volume_key),
+    }
+
+
+def upgrade_patient_cache(volume_keys=None, *, headroom_bytes=512 * 1024 ** 2, verbose=True):
+    """Convert legacy .npz archives to the memory-mappable layout, in place and verified.
+
+    One-time, and it costs one archive inflation per patient -- the same read the old
+    training loop paid for EVERY slice and for every patient just to count slices. Nothing
+    is deleted before it has been verified:
+
+      1. the arrays are written to `<member>.npy.part`;
+      2. each written file is memory-mapped and compared with the archive member by shape,
+         dtype and every value;
+      3. only then is the part file renamed, i.e. the member becomes visible to the reader;
+      4. only when every member is complete is the archive deleted.
+
+    A patient whose conversion fails keeps its archive and is listed in `failed`; the reader
+    keeps serving it from the archive. Free space is checked per patient first, so the peak
+    cost is one patient's payload rather than the whole cache.
+    """
+    report = {"converted": [], "already": [], "failed": [], "bytes_before": 0, "bytes_after": 0, "seconds": 0.0}
+    candidates = [
+        volume_key
+        for volume_key in (volume_keys if volume_keys is not None else cached_volumes())
+        if cache_layout(volume_key) == ARCHIVE_FORMAT
+    ]
+    if not candidates:
+        return report
+    started = time.time()
+    for index, volume_key in enumerate(candidates, start=1):
+        archive = cache_archive(volume_key)
+        try:
+            size = archive.stat().st_size
+            free = shutil.disk_usage(PATHS["cache"]).free
+            if free < size + headroom_bytes:
+                report["failed"].append(
+                    {"volume": volume_key, "reason": f"only {free / 1024 ** 2:.0f} MiB free, the archive needs {size / 1024 ** 2:.0f} MiB"}
+                )
+                continue
+            with np.load(archive, allow_pickle=False) as payload:
+                sources = {member: np.asarray(payload[member]) for member in CACHE_MEMBERS if member in payload.files}
+                meta = {
+                    "volume": volume_key,
+                    "grade": str(payload["grade"][0]) if "grade" in payload.files else "",
+                    "slices": [str(item) for item in payload["slices"]] if "slices" in payload.files else [],
+                }
+            # Every member is written, verified against the archive, and only then published;
+            # `images.npy` is published last, so the patient only becomes "memory-mappable"
+            # once all of it is on disk.
+            write_cache_members(volume_key, sources, verify=True)
+            write_json(cache_meta_path(volume_key), meta)
+            archive.unlink()
+            report["converted"].append(volume_key)
+            report["bytes_before"] += size
+            report["bytes_after"] += layout_bytes(volume_key)
+        except Exception as exc:  # noqa: BLE001 - a failed conversion must never lose the archive
+            clean_parts(volume_key)
+            report["failed"].append({"volume": volume_key, "reason": f"{type(exc).__name__}: {exc}"})
+        if verbose and (index % 25 == 0 or index == len(candidates)):
+            done = time.time() - started
+            print(
+                f"  cache upgrade {index}/{len(candidates)} ({done:.0f}s, {done / index:.2f}s per volume) -- "
+                f"{len(report['converted'])} converted, {len(report['failed'])} failed"
+            )
+    report["seconds"] = round(time.time() - started, 2)
+    report["bytes_before"] = int(report["bytes_before"])
+    report["bytes_after"] = int(report["bytes_after"])
+    if report["failed"]:
+        print(
+            f"WARNING: {len(report['failed'])} volumes kept their .npz archive "
+            f"({report['failed'][0]['reason']}). They still load, just more slowly."
+        )
+    return report
+
+
+# =============================================================================
+# Reading the cache: one payload per patient, one member per request
+# =============================================================================
+class PatientPayloadStore:
+    """Bounded reader for the cached patient payloads.
+
+    What went wrong before this class existed: `iterate_batches()` called `load_patient()`
+    once per patient (to count slices) and once per SLICE (to build the batch), and every
+    call inflated that patient's whole archive -- images + masks + singles, 165 MiB for a
+    real BraTS volume -- to look at one slice. A batch of 8 therefore cost 20 archive
+    inflations. On the reported run that measured 109.7 s for the first batch; the profile
+    put 100% of it inside `zipfile.read` (deflate), and the steady-state cost was 7.7 s per
+    batch of 8 -- about 1.6 hours of CPU per epoch, with the GPU waiting the whole time.
+
+    What this class does instead:
+
+      * reads are counted per PATIENT, not per slice -- a batch of 8 slices from 8 patients
+        costs at most 8 archive reads, and slices that share a patient share one read;
+      * only the members the caller asks for are touched: a 4-channel batch never opens
+        `singles` (half the payload), a single-channel batch never opens `images`;
+      * the memory-mappable layout decodes nothing -- slice i is read directly from disk;
+      * memory stays bounded: `patient_cache_mb` caps materialised arrays and
+        `patient_cache_handles` caps open memory maps, so nothing loads the dataset into RAM.
+
+    `PATIENT_STORE.stats_report()` is what the benchmark prints.
+    """
+
+    def __init__(self, *, budget_bytes=None, max_handles=None):
+        self.budget_bytes = (
+            int(budget_bytes) if budget_bytes is not None else int(RUN.get("patient_cache_mb", 1536)) * 1024 ** 2
+        )
+        self.max_handles = (
+            int(max_handles) if max_handles is not None else int(RUN.get("patient_cache_handles", 32))
+        )
+        self._handles = OrderedDict()        # volume -> {member: memory map}
+        self._entries = OrderedDict()        # volume -> {"layout", "members", "meta", "bytes", "slices"}
+        self._materialised_bytes = 0
+        self.stats = {
+            "payload_reads": 0,
+            "member_reads": 0,
+            "member_hits": 0,
+            "slice_requests": 0,
+            "slices_returned": 0,
+            "archive_reads": 0,
+            "evictions": 0,
+            "bytes_materialised": 0,
+        }
+
+    # -- bookkeeping ------------------------------------------------------
+    def _entry(self, volume_key):
+        entry = self._entries.get(volume_key)
+        if entry is not None:
+            self._entries.move_to_end(volume_key)
+        return entry
+
+    def _new_entry(self, volume_key, layout):
+        entry = {"layout": layout, "members": {}, "meta": None, "bytes": 0, "slices": None}
+        self._entries[volume_key] = entry
+        self._trim_materialised()
+        return entry
+
+    def _trim_materialised(self):
+        while self._materialised_bytes > self.budget_bytes and len(self._entries) > 1:
+            _, entry = self._entries.popitem(last=False)
+            self._materialised_bytes -= entry["bytes"]
+            self.stats["evictions"] += 1
+
+    def _trim_handles(self):
+        while len(self._handles) > self.max_handles:
+            self._handles.popitem(last=False)
+
+    def _read_member(self, volume_key, member):
+        """The member as it is stored: a memory map for the npy layout, an array for an archive.
+
+        Memory maps live only in `_handles`, never in the entry: each open map holds a file
+        descriptor, and with 369 patients x 3 members a dict that keeps them all would hit the
+        process file-descriptor limit. `_handles` is capped (`patient_cache_handles`), so an
+        evicted map is closed by refcounting as soon as its slices have been copied out.
+        Materialised arrays (the archive layout, and `load_patient`) live in the entry instead,
+        where they are counted against the byte budget.
+        """
+        layout = cache_layout(volume_key)
+        if layout is None:
+            raise CacheError(f"{volume_key} is not cached; run the preprocessing cell first")
+        entry = self._entry(volume_key) or self._new_entry(volume_key, layout)
+        current = entry["members"].get(member)
+        if current is not None:
+            self.stats["member_hits"] += 1
+            return current
+        handles = self._handles.get(volume_key)
+        if handles and member in handles:
+            self.stats["member_hits"] += 1
+            self._handles.move_to_end(volume_key)
+            return handles[member]
+        self.stats["member_reads"] += 1
+        if layout == MEMORY_MAP_FORMAT:
+            path = cache_member_path(volume_key, member)
+            if not path.exists():
+                raise CacheError(f"{volume_key}: the cache has no {member} member")
+            array = np.load(path, mmap_mode="r")
+            self._handles.setdefault(volume_key, {})[member] = array
+            self._handles.move_to_end(volume_key)
+            self._trim_handles()
+            return array
+        with np.load(cache_archive(volume_key), allow_pickle=False) as payload:
+            self.stats["archive_reads"] += 1
+            if member not in payload.files:
+                raise CacheError(f"{volume_key}: the archive has no {member} member")
+            array = np.asarray(payload[member])
+        entry["members"][member] = array
+        entry["bytes"] += int(array.nbytes)
+        self._materialised_bytes += int(array.nbytes)
+        self.stats["bytes_materialised"] += int(array.nbytes)
+        self._trim_materialised()
+        return array
+
+    def _materialised_member(self, volume_key, member):
+        """The member as an in-memory array (what `load_patient()` promises callers).
+
+        The array is returned directly, so it stays valid even if the eviction below or a
+        later request pushes this patient out of the store.
+        """
+        array = self._read_member(volume_key, member)
+        if isinstance(array, np.memmap):
+            array = np.array(array, copy=True)          # detach from the file
+            entry = self._entry(volume_key)
+            if entry is not None:
+                entry["members"][member] = array
+                entry["bytes"] += int(array.nbytes)
+                self._materialised_bytes += int(array.nbytes)
+                self.stats["bytes_materialised"] += int(array.nbytes)
+            handles = self._handles.get(volume_key)
+            if handles is not None:                      # this member no longer needs its map
+                handles.pop(member, None)
+                if not handles:
+                    self._handles.pop(volume_key, None)
+            self._trim_materialised()
+        return array
+
+    def _meta(self, volume_key, layout):
+        entry = self._entry(volume_key) or self._new_entry(volume_key, layout)
+        if entry["meta"] is not None:
+            return entry["meta"]
+        if layout == MEMORY_MAP_FORMAT:
+            stored = read_json(cache_meta_path(volume_key), default=None) or {}
+            meta = {"grade": str(stored.get("grade") or "") or None,
+                    "slices": [str(item) for item in stored.get("slices", [])]}
+        else:
+            with np.load(cache_archive(volume_key), allow_pickle=False) as payload:
+                self.stats["archive_reads"] += 1
+                grade = str(payload["grade"][0]) if "grade" in payload.files else ""
+                slice_paths = [str(item) for item in payload["slices"]] if "slices" in payload.files else []
+            meta = {"grade": grade or None, "slices": slice_paths}
+        entry["meta"] = meta
+        return meta
+
+    # -- public API -------------------------------------------------------
+    def release(self, volume_key=None):
+        """Forget cached state (the benchmark uses this to measure a cold read)."""
+        if volume_key is None:
+            self._handles.clear()
+            self._entries.clear()
+            self._materialised_bytes = 0
+            return
+        entry = self._entries.pop(volume_key, None)
+        if entry is not None:
+            self._materialised_bytes -= entry["bytes"]
+        self._handles.pop(volume_key, None)
+
+    def slice_count(self, volume_key):
+        entry = self._entry(volume_key)
+        if entry is not None and entry["slices"] is not None:
+            return entry["slices"]
+        count = patient_slice_count(volume_key)
+        entry = self._entry(volume_key) or self._new_entry(volume_key, cache_layout(volume_key) or MEMORY_MAP_FORMAT)
+        entry["slices"] = count
+        return count
+
+    def slices(self, volume_key, positions, *, member):
+        """Rows `positions` of one member, in the order requested. Nothing else is read."""
+        array = self._read_member(volume_key, member)
+        self.stats["slice_requests"] += 1
+        if len(positions) == 0:
+            return np.empty((0,) + tuple(array.shape[1:]), dtype=array.dtype)
+        self.stats["slices_returned"] += len(positions)
+        rows = array[np.asarray(positions, dtype=np.int64)]
+        return np.array(rows, copy=True)      # always a fresh array, never a view into a map
+
+    def payload(self, volume_key):
+        """The full payload dict `load_patient()` has always returned.
+
+        The arrays are detached copies: a caller may keep them after the store evicted the
+        patient, without holding a file descriptor open.
+        """
+        self.stats["payload_reads"] += 1
+        layout = cache_layout(volume_key)
+        if layout is None:
+            raise CacheError(f"{volume_key} is not cached; run the preprocessing cell first")
+        images = self._materialised_member(volume_key, "images")
+        masks = self._materialised_member(volume_key, "masks")
+        singles = self._materialised_member(volume_key, "singles")
+        meta = self._meta(volume_key, layout)
+        return {
+            "volume": volume_key,
+            "images": images,     # (S, H, W, 4) float16, channels T1, T1ce, T2, FLAIR
+            "masks": masks,       # (S, H, W) uint8, whole tumour
+            "singles": singles,   # (S, 512, 512) float16, scaled to [0, 1]
+            "grade": meta["grade"],
+            "slices": meta["slices"],
+            "layout": layout,
+        }
+
+    def stats_report(self):
+        report = dict(self.stats)
+        report["budget_mib"] = round_mib(self.budget_bytes)
+        report["materialised_mib"] = round_mib(self._materialised_bytes)
+        report["open_memory_maps"] = len(self._handles)
+        report["max_handles"] = self.max_handles
+        return report
+
+
+PATIENT_STORE = None
+
+
+def patient_store(*, budget_bytes=None, max_handles=None, reset=False):
+    """The process-wide payload store (created on first use, recreatable for tests)."""
+    global PATIENT_STORE
+    if PATIENT_STORE is None or reset:
+        PATIENT_STORE = PatientPayloadStore(budget_bytes=budget_bytes, max_handles=max_handles)
+    return PATIENT_STORE
+
+
+def load_patient(volume_key, split_guard=True, legacy_archive=False):
+    """One patient's cached payload.
+
+    `legacy_archive=True` reads the compressed archive directly, which is what this function
+    did before the store existed: one full inflation per call. It is kept so the benchmark
+    can measure the old behaviour on the same cache, and so an un-migrated cache stays
+    readable even if its index cannot be built.
+    """
+    if legacy_archive:
+        path = cache_archive(volume_key)
+        if not path.exists():
+            raise CacheError(f"{volume_key} has no .npz archive to read in legacy mode")
+        with np.load(path, allow_pickle=False) as payload:
+            return {
+                "volume": volume_key,
+                "images": np.asarray(payload["images"]),
+                "masks": np.asarray(payload["masks"]),
+                "singles": np.asarray(payload["singles"]),
+                "grade": str(payload["grade"][0]) or None,
+                "slices": [str(item) for item in payload["slices"]],
+                "layout": ARCHIVE_FORMAT,
+            }
+    return patient_store().payload(volume_key)
+
+
+def measure_cache_io(volume_keys, *, slices=4, repeats=3, legacy_repeats=1):
+    """Cost of preparing a batch, of reading one slice, and of building the slice index.
+
+    Every row is measured on the same volumes, the same slice positions and the same cache
+    state, so the layouts and the two readers can be compared like for like:
+
+      * `legacy_*`   what the old batch loop did -- `load_patient()` per slice, i.e. one
+                     whole-archive inflation per slice. Reported only for volumes that
+                     still have their `.npz` archive, and `None` otherwise, because it
+                     cannot be measured honestly once the archive is gone.
+      * `batch_*`    what `iterate_batches()` does now -- one member read per patient plus a
+                     direct slice read (or one inflation per patient on an archive).
+      * `index_*`    building the slice index from the in-memory index (per epoch).
+      * `cold_index_*` the first-time cost: one header probe per patient instead of one
+                     payload load per patient.
+    """
+    store = patient_store()
+    keys = [key for key in volume_keys if cache_layout(key) is not None]
+    if not keys:
+        return {"volumes": 0, "note": "no cached volume to measure"}
+    positions = list(range(min(slices, max(1, patient_slice_count(keys[0])))))
+
+    def best(fn, repeats=repeats):
+        values = []
+        for _ in range(repeats):
+            started = time.perf_counter()
+            fn()
+            values.append(time.perf_counter() - started)
+        return min(values)
+
+    def optimised_batch():
+        for volume_key in keys:
+            store.release(volume_key)                     # cold patient, as a shuffled batch sees it
+            store.slices(volume_key, positions, member="images")
+            store.slices(volume_key, positions, member="masks")
+
+    def legacy_batch():
+        # one archive read per slice: that is what the old loop did (`load_patient` per
+        # slice, inflating images + masks + singles each time), so this row is the
+        # like-for-like "before" number rather than a cheaper approximation of it.
+        for volume_key in keys:
+            for position in positions:
+                with np.load(cache_archive(volume_key), allow_pickle=False) as payload:
+                    _ = payload["images"][position], payload["masks"][position]
+
+    def optimised_index():
+        return sum(patient_slice_count(key) for key in keys)
+
+    def cold_index():
+        for key in keys:
+            probe_patient(key)
+        CACHE_INDEX_PROBES["header_reads"] += len(keys)
+        return len(keys)
+
+    def legacy_index():
+        total = 0
+        for key in keys:
+            total += load_patient(key, legacy_archive=True)["masks"].shape[0]
+        return total
+
+    archives_only = all(cache_archive(key).exists() for key in keys)
+    layout = cache_layout(keys[0])
+    optimised = best(optimised_batch)
+    # The legacy reader is the slow one by design: once is enough to measure it.
+    legacy = best(legacy_batch, repeats=legacy_repeats) if archives_only else None
+    store.release()
+    optimised_index_seconds = best(optimised_index, repeats=1)
+    cold_index_seconds = best(cold_index, repeats=1)
+    legacy_index_seconds = best(legacy_index, repeats=legacy_repeats) if archives_only else None
+    store.release()
+    total_slices = len(keys) * len(positions)
+    return {
+        "volumes": len(keys),
+        "layout": layout,
+        "slices_per_volume": len(positions),
+        "batch_seconds": round(optimised, 4),
+        "batch_seconds_per_volume": round(optimised / len(keys), 5),
+        "batch_seconds_per_slice": round(optimised / total_slices, 6),
+        "legacy_batch_seconds": None if legacy is None else round(legacy, 4),
+        "legacy_batch_seconds_per_slice": None if legacy is None else round(legacy / total_slices, 6),
+        "index_seconds": round(optimised_index_seconds, 4),
+        "index_seconds_per_volume": round(optimised_index_seconds / len(keys), 6),
+        "cold_index_seconds_per_volume": round(cold_index_seconds / len(keys), 6),
+        "legacy_index_seconds_per_volume": None if legacy_index_seconds is None
+        else round(legacy_index_seconds / len(keys), 6),
+        "legacy_measured": archives_only,
+        "store": store.stats_report(),
+    }
+
+
+# =============================================================================
+# Build the cache (skipped for every volume that is already cached)
+# =============================================================================
 CACHE_REPORT = []
 CACHE_STARTED = time.time()
 for index, (volume_key, entry) in enumerate(sorted(VOLUMES.items()), start=1):
@@ -608,57 +1307,137 @@ for index, (volume_key, entry) in enumerate(sorted(VOLUMES.items()), start=1):
     if index % 25 == 0 or index == len(VOLUMES):
         elapsed = time.time() - CACHE_STARTED
         print(f"cached {index}/{len(VOLUMES)} volumes ({elapsed:.0f}s, {elapsed / index:.2f}s per volume)")
-write_json(PATHS["artifacts"] / "cache_report.json", CACHE_REPORT)
 
-CACHED = [item for item in CACHE_REPORT if Path(item["path"]).exists()]
-total_bytes = sum(Path(item["path"]).stat().st_size for item in CACHED)
+CACHED = [item for item in CACHE_REPORT if cache_layout(item["volume"]) is not None]
+total_bytes = sum(layout_bytes(item["volume"]) for item in CACHED)
+write_json(
+    PATHS["artifacts"] / "cache_report.json",
+    {
+        "generated_at": utc_now(),
+        "volumes": len(VOLUMES),
+        "cached": len(CACHED),
+        "preferred_layout": RUN.get("cache_format", MEMORY_MAP_FORMAT),
+        "bytes": int(total_bytes),
+        "per_volume": CACHE_REPORT,
+    },
+)
+
+# --- the old behaviour, measured on this cache before it is migrated -------------------
+# `load_patient()` inflated the whole compressed archive once per slice read, and once per
+# patient just to count slices. Both are measured here on the same volumes, the same slices
+# and the same cache state as the optimised reader below, so the before/after comparison is
+# a measurement rather than an expectation.
+LEGACY_VOLUMES = [item["volume"] for item in CACHED if cache_layout(item["volume"]) == ARCHIVE_FORMAT]
+# Four volumes x four slices, read in both layouts. A batch of RUN["batch_size"] is that
+# many reads; the per-slice column scales to it without re-measuring.
+SAMPLE = LEGACY_VOLUMES[:4] or [item["volume"] for item in CACHED][:4]
+CACHE_IO_BEFORE = measure_cache_io(SAMPLE) if LEGACY_VOLUMES else None
+
+# --- one-time, verified conversion of a legacy cache ----------------------------------
+CACHE_UPGRADE = {"converted": [], "already": [], "failed": [], "seconds": 0.0}
+if RUN.get("upgrade_cache_to_memmap", True) and LEGACY_VOLUMES:
+    print(
+        f"{len(LEGACY_VOLUMES)} volumes are still in the compressed layout; converting them in "
+        "place (verified array by array, one patient at a time)..."
+    )
+    CACHE_UPGRADE = upgrade_patient_cache()
+load_cache_index(rebuild=True)
+write_cache_index()
+
+# Same patient IDs, same slices, same batch size: only the cache layout changed.
+CACHE_IO_AFTER = measure_cache_io(SAMPLE)
+write_json(
+    PATHS["artifacts"] / "cache_io_benchmark.json",
+    {"sample": SAMPLE, "before": CACHE_IO_BEFORE, "after": CACHE_IO_AFTER, "upgrade": CACHE_UPGRADE, "generated_at": utc_now()},
+)
+
+# =============================================================================
+# Summary
+# =============================================================================
+# Sizes are re-read after the conversion, so the numbers describe the cache as it is now.
+DISK = shutil.disk_usage(PATHS["cache"])
+total_bytes = sum(layout_bytes(item["volume"]) for item in CACHED)
+per_volume_bytes = total_bytes / max(1, len(CACHED))
 print("=" * 78)
 print("PREPROCESSING")
 print("=" * 78)
 print(f"cached volumes   : {len(CACHED)}")
-print(f"cache size       : {total_bytes / 1024 ** 2:.1f} MiB")
+print(f"cache size       : {total_bytes / 1024 ** 2:.1f} MiB ({per_volume_bytes / 1024 ** 2:.0f} MiB per volume)")
+print(f"cache layout     : {sum(1 for item in CACHED if cache_layout(item['volume']) == MEMORY_MAP_FORMAT)} memory-mappable, "
+      f"{sum(1 for item in CACHED if cache_layout(item['volume']) == ARCHIVE_FORMAT)} compressed")
+if per_volume_bytes:
+    print(f"disk space       : {DISK.free / 1024 ** 3:.1f} GiB free of {DISK.total / 1024 ** 3:.1f} GiB; at the measured "
+          f"{per_volume_bytes / 1024 ** 3:.3f} GiB per volume the full 369-volume release needs about "
+          f"{369 * per_volume_bytes / 1024 ** 3:.0f} GiB")
 print(f"4-channel tensors: {len(CACHED)} x [N_slices, {RUN['image_size']}, {RUN['image_size']}, 4] (z-scored, CHW at load time)")
 print(f"1-channel tensors: {len(CACHED)} x [N_slices, {RUN['single_image_size']}, {RUN['single_image_size']}] (scaled to [0, 1])")
-print("A rerun skips existing files, so this cell is cheap the second time.")
-
-
-class CacheError(RuntimeError):
-    pass
-
-
-def load_patient(volume_key, split_guard=True):
-    path = PATHS["cache"] / f"{volume_key}.npz"
-    if not path.exists():
-        raise CacheError(f"{volume_key} is not cached; run the preprocessing cell first")
-    with np.load(path, allow_pickle=False) as payload:
-        return {
-            "volume": volume_key,
-            "images": payload["images"],       # (S, H, W, 4) float16
-            "masks": payload["masks"],         # (S, H, W) uint8
-            "singles": payload["singles"],     # (S, 512, 512) float16
-            "grade": str(payload["grade"][0]) or None,
-            "slices": [str(item) for item in payload["slices"]],
-        }
+print("A rerun skips existing cache entries, so this cell is cheap the second time.")
+print()
+print("CACHE READ BENCHMARK -- same volumes, same slices, same cache state")
+print("-" * 78)
+if CACHE_IO_BEFORE:
+    print(f"  before  archive   : {CACHE_IO_BEFORE['legacy_batch_seconds_per_slice'] * 1000:9.3f} ms per slice "
+          f"({CACHE_IO_BEFORE['legacy_batch_seconds']:.3f} s to read "
+          f"{CACHE_IO_BEFORE['slices_per_volume']} slices x {CACHE_IO_BEFORE['volumes']} volumes; "
+          f"{CACHE_IO_BEFORE['legacy_batch_seconds_per_slice'] * RUN['batch_size'] * 1000:.0f} ms for a batch of {RUN['batch_size']})")
+    print(f"                      index build: {CACHE_IO_BEFORE['legacy_index_seconds_per_volume'] * 1000:.1f} ms per volume")
+else:
+    print("  before  archive   : not measured -- this cache was already converted (or built new)")
+print(f"  after   memory map: {CACHE_IO_AFTER['batch_seconds_per_slice'] * 1000:9.4f} ms per slice "
+      f"({CACHE_IO_AFTER['batch_seconds']:.4f} s for {CACHE_IO_AFTER['slices_per_volume']} slices x "
+      f"{CACHE_IO_AFTER['volumes']} volumes, cold patient each time; "
+      f"{CACHE_IO_AFTER['batch_seconds_per_slice'] * RUN['batch_size'] * 1000:.2f} ms for a batch of {RUN['batch_size']})")
+print(f"                      index build: {CACHE_IO_AFTER['cold_index_seconds_per_volume'] * 1000:.3f} ms per volume "
+      f"for the first probe, then {CACHE_IO_AFTER['index_seconds_per_volume'] * 1e6:.1f} us per volume from the index")
+if CACHE_IO_BEFORE and CACHE_IO_BEFORE["legacy_batch_seconds_per_slice"] and CACHE_IO_AFTER["batch_seconds_per_slice"]:
+    print(f"  batch preparation is {CACHE_IO_BEFORE['legacy_batch_seconds_per_slice'] / CACHE_IO_AFTER['batch_seconds_per_slice']:,.0f}x "
+          f"cheaper per slice; the index no longer reads any array data")
+print(f"  in a batch of {RUN['batch_size']}: about "
+      f"{CACHE_IO_AFTER['batch_seconds_per_slice'] * RUN['batch_size'] * 1000:.1f} ms of CPU preparation, "
+      "one page-cache read per patient, no decompression")
+print("=" * 78)
 
 
 def validate_cache(sample=5):
-    """Fail early and loudly on a corrupt cache instead of training on garbage."""
+    """Fail early and loudly on a corrupt cache instead of training on garbage.
+
+    Works for both layouts and reads only a couple of slices per patient, plus the index
+    header, so validating the cache does not itself cost a payload load.
+    """
     problems = []
+    store = patient_store()
+    checked = 0
     for item in CACHED[:sample]:
-        payload = np.load(Path(item["path"]), allow_pickle=False)
-        images, masks = payload["images"], payload["masks"]
-        if images.ndim != 4 or images.shape[-1] != 4:
-            problems.append(f"{item['volume']}: image tensor {images.shape} is not (S, H, W, 4)")
-        if masks.ndim != 3:
-            problems.append(f"{item['volume']}: mask tensor {masks.shape} is not (S, H, W)")
-        if not np.isfinite(images.astype(np.float32)).all():
-            problems.append(f"{item['volume']}: non-finite image values")
-        if masks.astype(np.uint8).max(initial=0) > 1:
-            problems.append(f"{item['volume']}: mask is not binary (values above 1)")
+        volume_key = item["volume"]
+        entry = cache_index_entry(volume_key, refresh=True)
+        if entry is None:
+            problems.append(f"{volume_key}: no cache entry")
+            continue
+        shapes = entry["members"]
+        if len(shapes.get("images", [])) != 4 or shapes["images"][-1] != 4:
+            problems.append(f"{volume_key}: image tensor {shapes.get('images')} is not (S, H, W, 4)")
+        if len(shapes.get("masks", [])) != 3:
+            problems.append(f"{volume_key}: mask tensor {shapes.get('masks')} is not (S, H, W)")
+        if shapes.get("images", [None])[:2] != shapes.get("masks", [None])[:2]:
+            problems.append(
+                f"{volume_key}: mask resolution {shapes.get('masks', [])[:2]} does not match images {shapes.get('images', [])[:2]}"
+            )
+        positions = sorted({0, max(0, int(entry["slices"]) - 1)})
+        images = np.asarray(store.slices(volume_key, positions, member="images"), dtype=np.float32)
+        masks = np.asarray(store.slices(volume_key, positions, member="masks"))
+        if not np.isfinite(images).all():
+            problems.append(f"{volume_key}: non-finite image values")
+        if masks.max(initial=0) > 1:
+            problems.append(f"{volume_key}: mask is not binary (values above 1)")
+        if masks.shape[-2:] != images.shape[-3:-1]:
+            problems.append(f"{volume_key}: mask and image resolutions disagree ({masks.shape} vs {images.shape})")
+        checked += 1
+    store.release()
     if problems:
         raise CacheError("cache validation failed: " + "; ".join(problems[:5]))
-    return {"checked": min(sample, len(CACHED)), "problems": problems}
+    return {"checked": checked, "problems": problems, "index_probes": CACHE_INDEX_PROBES["header_reads"]}
 
 
 CACHE_VALIDATION = validate_cache()
 print("cache validation :", CACHE_VALIDATION)
+print("payload store    :", patient_store().stats_report())

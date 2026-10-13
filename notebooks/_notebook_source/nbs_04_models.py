@@ -41,6 +41,73 @@ segnet_trainer = SegmentationTrainer(
 )
 print(f"SegNet parameters: {SEGNET_PARAMETERS:,} (the application's builder produces the same graph)")
 
+# --- pre-flight checks and a real benchmark, BEFORE the first epoch -----------
+# A one-batch forward/backward, the tensors' shapes and dtypes, a finite loss and real
+# gradients, a checkpoint that saves and reloads, and the five phases of a training step
+# measured separately. Nothing here is estimated: the numbers below are what this machine
+# and this cache actually do, which is what decides whether the epoch loop is worth starting.
+if RUN.get("benchmark_before_training", True):
+    print("=" * 78)
+    print("PRE-TRAINING CHECKS -- SegNet")
+    print("=" * 78)
+    SEGNET_SELF_TEST = verify_training_step(
+        segnet_trainer, TRAIN_PATIENTS, batch_size=RUN["batch_size"], size=RUN["image_size"]
+    )
+    print(f"  batch                : images {SEGNET_SELF_TEST['images_shape']} {SEGNET_SELF_TEST['images_dtype']} | "
+          f"masks {SEGNET_SELF_TEST['masks_shape']} {SEGNET_SELF_TEST['masks_dtype']} values {SEGNET_SELF_TEST['mask_values']}")
+    print(f"  forward output       : {SEGNET_SELF_TEST['output_shape']} on {SEGNET_SELF_TEST['output_device']}")
+    print(f"  loss                 : {SEGNET_SELF_TEST['loss']} (finite: {SEGNET_SELF_TEST['loss_finite']}), "
+          f"amp {SEGNET_SELF_TEST['amp_enabled']} ({SEGNET_SELF_TEST['autocast_dtype']})")
+    print(f"  gradients            : {SEGNET_SELF_TEST['gradients']} tensors, norm {SEGNET_SELF_TEST['gradient_norm']}, "
+          f"finite {SEGNET_SELF_TEST['gradients_finite']}, nonzero {SEGNET_SELF_TEST['gradients_nonzero']}")
+    print(f"  inputs finite        : {SEGNET_SELF_TEST['images_finite']} | masks binary: {SEGNET_SELF_TEST['masks_binary']}")
+    print(f"  checkpoint           : {SEGNET_SELF_TEST['checkpoint_path']}")
+    print(f"                         keys: {', '.join(SEGNET_SELF_TEST['checkpoint_keys'])}")
+    print(f"                         reloads byte-identically: {SEGNET_SELF_TEST['checkpoint_reload_ok']}")
+    print(f"  resume state         : {SEGNET_SELF_TEST['resume_state']}")
+    write_json(PATHS["artifacts"] / "segnet_self_test.json", SEGNET_SELF_TEST)
+
+    SEGNET_BENCHMARK = benchmark_training_step(
+        segnet_trainer,
+        TRAIN_PATIENTS,
+        batch_size=RUN["batch_size"],
+        size=RUN["image_size"],
+        steps=RUN["benchmark_steps"],
+        warmup=RUN["benchmark_warmup"],
+        legacy=bool(RUN.get("benchmark_legacy_pipeline", False)),
+    )
+    SEGNET_BENCHMARK["cache_io"] = {"before": CACHE_IO_BEFORE, "after": CACHE_IO_AFTER, "upgrade": CACHE_UPGRADE}
+    print()
+    print(f"  BENCHMARK -- {SEGNET_BENCHMARK['steps_measured']} measured steps after "
+          f"{SEGNET_BENCHMARK['steps_warmup']} warm-up, batch {SEGNET_BENCHMARK['batch_size']}, "
+          f"{SEGNET_BENCHMARK['channels']}x{SEGNET_BENCHMARK['input_size']}x{SEGNET_BENCHMARK['input_size']}, "
+          f"{SEGNET_BENCHMARK['device']}, pipeline '{SEGNET_BENCHMARK['pipeline']}'")
+    for label, key in (
+        ("1. batch preparation", "prepare"),
+        ("2. CPU -> GPU transfer", "cpu_to_gpu"),
+        ("3. forward pass", "forward"),
+        ("4. backward + optimiser step", "backward_and_step"),
+        ("5. end-to-end training step", "step_total"),
+    ):
+        entry = SEGNET_BENCHMARK["phases_seconds"][key]
+        if entry["n"]:
+            print(f"     {label:30s} median {entry['median'] * 1000:9.2f} ms   "
+                  f"min {entry['min'] * 1000:9.2f} ms   max {entry['max'] * 1000:9.2f} ms")
+        else:
+            print(f"     {label:30s} not measured")
+    print(f"     {'first batch (cold start)':30s} {SEGNET_BENCHMARK['first_batch_seconds']} s")
+    print(f"     {'preparation share of a step':30s} {SEGNET_BENCHMARK.get('prepare_share_of_step')}")
+    print(f"     {'GPU utilisation (nvidia-smi)':30s} {SEGNET_BENCHMARK['gpu_utilization']}")
+    if CACHE_IO_BEFORE and CACHE_IO_BEFORE.get("legacy_batch_seconds_per_slice"):
+        print(f"     {'cache read before (archive)':30s} "
+              f"{CACHE_IO_BEFORE['legacy_batch_seconds_per_slice'] * 1000:.3f} ms per slice")
+    print(f"     {'cache read after (memory map)':30s} "
+          f"{CACHE_IO_AFTER['batch_seconds_per_slice'] * 1000:.3f} ms per slice")
+    for note in SEGNET_BENCHMARK["notes"]:
+        print("     note:", note)
+    write_json(PATHS["artifacts"] / "segnet_benchmark.json", SEGNET_BENCHMARK)
+    print("=" * 78)
+
 if not RUN.get("skip_segnet_training", False):
     SEGNET_BUDGET = TimeBudget(RUN["session_budget_minutes"])
     SEGNET_SUMMARY = segnet_trainer.train(
