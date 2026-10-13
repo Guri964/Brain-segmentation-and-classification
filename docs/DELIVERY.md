@@ -34,6 +34,29 @@ whole path was executed against a synthetic fixture, which is why the pipeline i
 working while **no classification metric is reported as a result** — the fixture labels are
 made up.
 
+### Region measurements (abnormality measurements)
+
+`4.pdf` item NO 6 asks for pixel area, bounding box, width, height, image coverage, centroid,
+perimeter and shape descriptors. Everything except the centroid already existed (the
+segmentation summary carries the foreground count and fraction, and the radiomics shape family
+carries bbox, perimeter, circularity and elongation). This change closes the gap and puts the
+values in one place:
+
+* `backend/app/ml/region_metrics.py` — one definition of the geometry, shared by the analysis
+  payload and the radiomics quality block, so the two can never disagree. The perimeter uses
+  the same Crofton estimator as `radiomics_native.shape_features_2d` (a test pins the equality).
+* `region_measurements` in the analysis payload, `roi_centroid` in the radiomics quality block,
+  a "Abnormal region measurements" table in the PDF report, and the region sentence in the
+  assistant's measurements answer.
+* The *Segmentation* page now shows an "Abnormal region analysis" card (detected, area,
+  coverage, bounding box, centroid, boundary length, equivalent diameter, mask source) and the
+  *Radiomics* page shows the ROI centroid.
+* An empty region is reported as `detected: false` with `null` geometry — never as a
+  zero-sized region.
+
+`docs/REQUIREMENTS_TRACEABILITY.md` maps every requirement of the two supplied documents
+(`3.pdf`, `4.pdf`) to its implementation, endpoint, UI page, test and honest limitation.
+
 ## B. New structure
 
 ```
@@ -258,9 +281,9 @@ summary, because the fixture labels and masks are synthetic.
 
 | Command | Result |
 | --- | --- |
-| `/home/user/.venv/bin/python -m pytest tests -q` | **142 passed** in 110 s (CPU only) |
+| `/home/user/.venv/bin/python -m pytest tests -q` | **152 passed** in 97 s (CPU only) |
 | `cd frontend && npx tsc --noEmit` | **0 errors** under `strict`, `noUnusedLocals`, `noUnusedParameters` |
-| `cd frontend && npm run build` | Success: 880.60 kB JavaScript (250.08 kB gzipped), 38.36 kB CSS |
+| `cd frontend && npm run build` | Success: 881.93 kB JavaScript (250.46 kB gzipped), 38.36 kB CSS |
 | `git status --porcelain` | clean after commit |
 
 Coverage: checkpoint loading and registry behaviour, preprocessing contracts (including the
@@ -278,10 +301,13 @@ classes), the artefact installer (never overwriting shipped files, backing up be
 installing the second dataset's artefacts and labelling each one with its task and dataset), and
 the training provenance rules (a fixture-trained model is never reported as trained on real data,
 absent provenance is its own state rather than an assumption, and the shipped legacy classifier
-does not inherit the trained classifier's provenance), and the cached-array data pipeline
+does not inherit the trained classifier's provenance), the cached-array data pipeline
 (`tests/test_data_pipeline.py`: bit-for-bit equality with the replaced reader, reads counted per
 patient rather than per slice, no archive inflation anywhere, bounded byte budget and handle cap,
-publish-last writes, and a conversion that never deletes an archive it could not verify).
+publish-last writes, and a conversion that never deletes an archive it could not verify), and the
+region measurements (`tests/test_region_measurements.py`: hand-computed geometry, agreement with
+the radiomics shape estimator, an empty mask reported as "not detected" rather than as zero, and
+the values reaching the API, the PDF report and the assistant).
 
 ## I. Setup
 
@@ -290,7 +316,7 @@ python -m venv .venv
 .venv/bin/pip install -r backend/requirements.txt          # add requirements-dev.txt for tests
 .venv/bin/python scripts/setup_env.py                      # environment report
 .venv/bin/python scripts/check_models.py                   # reference verification of the checkpoints
-.venv/bin/python -m pytest tests -q                        # 142 tests
+.venv/bin/python -m pytest tests -q                        # 152 tests
 
 cd frontend && npm install && npm run build && cd ..
 .venv/bin/python backend/run.py                            # http://127.0.0.1:5000

@@ -109,6 +109,15 @@ Returns **201** with the canonical analysis payload (the same object stored as
   "ensemble": { "available": false, "strategy": "equal", "weights": {}, "members": [], "reasons": ["Fewer than two segmentation checkpoints are usable; an ensemble needs at least two."] },
   "uncertainty": { "available": true, "method": "test_time_augmentation", "n_passes": 5, "mean_dispersion": 0.0153, ... },
   "reference_mask": { "source": "model:unet_dynamic_512", "model_id": "unet_dynamic_512", "foreground_pixels": 5556 },
+  "region_measurements": {
+    "detected": true, "pixel_area": 5556, "image_coverage": 0.0212, "image_coverage_percent": 2.12,
+    "bounding_box": { "x": 121, "y": 96, "width": 137, "height": 148 },
+    "centroid": { "x": 191.42, "y": 168.07 },
+    "perimeter_px": 712.43, "equivalent_diameter_px": 84.11,
+    "units": "pixels", "image_size": { "width": 512, "height": 512 },
+    "mask_source": "model:unet_dynamic_512",
+    "note": "Measurements describe the region the segmentation model produced. …"
+  },
   "radiomics": { "available": true, "backend": "native", "dimensionality": "2D", "feature_count": 68, "spacing_available": false, "features": { ... }, "categories": { ... }, "quality": { ... }, "warnings": ["…"] },
   "explainability": [ { "model_id": "unet_dynamic_512", "available": true, "method": "grad_cam", "target_layer": "conv9_2", "heatmap_mean": 0.28, "artifacts": { "heatmap": "gradcam_unet_dynamic_512.png", "overlay": "gradcam_overlay_unet_dynamic_512.png" } } ],
   "classification": { "available": false, "reason": "No validated classifier artefact was found in …" },
@@ -118,6 +127,14 @@ Returns **201** with the canonical analysis payload (the same object stored as
   "disclaimer": "Research prototype. …"
 }
 ```
+
+`region_measurements` is measured from the reference mask on every analysis
+(`backend/app/ml/region_metrics.py`): pixel area, image coverage, the tightest bounding box
+(`x`, `y`, `width`, `height`), the centroid, the boundary length and the equivalent diameter,
+each in **pixels**. When nothing crosses the threshold, `detected` is `false` and the geometry
+is `null` — never `0`. The same block is rendered in the PDF report and quoted by the
+assistant; `GET /api/radiomics/analysis/<id>` additionally returns `roi_centroid` (per mask
+axis, same order as `roi_bounding_box`) inside `quality`.
 
 ### `POST /api/analysis/plan`
 

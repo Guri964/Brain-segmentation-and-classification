@@ -364,6 +364,16 @@ export default function RadiomicsPage() {
                 }
               />
               <Row
+                label="ROI centroid (per axis, px)"
+                value={
+                  radiomics.quality?.roi_centroid
+                    ? radiomics.quality.roi_centroid
+                        .map((value) => formatNumber(value, 2))
+                        .join(", ")
+                    : NOT_AVAILABLE
+                }
+              />
+              <Row
                 label="Touches field-of-view border"
                 value={
                   radiomics.quality?.roi_touches_fov_border === undefined

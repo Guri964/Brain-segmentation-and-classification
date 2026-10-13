@@ -204,6 +204,18 @@ class AssistantService:
             )
         features = radiomics.get("features") or {}
         quality = radiomics.get("quality") or {}
+        measurements = analysis.get("region_measurements") or {}
+        region_line = ""
+        if measurements.get("detected"):
+            bbox = measurements.get("bounding_box") or {}
+            centroid = measurements.get("centroid") or {}
+            region_line = (
+                f" The region covers {measurements.get('pixel_area')} pixels "
+                f"({measurements.get('image_coverage_percent')} % of the image); its bounding box is "
+                f"{bbox.get('width')} x {bbox.get('height')} pixels starting at "
+                f"(x={bbox.get('x')}, y={bbox.get('y')}) and its centroid is at "
+                f"(x={centroid.get('x')}, y={centroid.get('y')})."
+            )
         interesting = [
             ("shape_pixel_area", "pixels covered by the region"),
             ("shape_perimeter_px", "boundary length in pixels"),
@@ -235,9 +247,10 @@ class AssistantService:
                 f"{radiomics.get('backend')} extractor on a {radiomics.get('dimensionality')} region. "
                 + "; ".join(lines[:8])
                 + f". Region size: {quality.get('roi_voxel_count', 'unknown')} pixels. {spacing}"
+                + region_line
             ),
             topic="measurements",
-            sources=["radiomics.features", "radiomics.quality"],
+            sources=["radiomics.features", "radiomics.quality", "region_measurements"],
             grounding={"feature_count": radiomics.get("feature_count"), "region_size": quality.get("roi_voxel_count")},
         )
     def _topic_radiomics(self, analysis: dict) -> AssistantAnswer:
@@ -578,8 +591,10 @@ def _is_unsafe(question: str) -> bool:
     return any(pattern in lowered for pattern in REFUSAL_PATTERNS)
 def _classify(text: str) -> str:
     rules = [
+        # Size questions are measurements, even when they are phrased around the mask or the
+        # segmented region ("how large is the segmented region?"), so this rule comes first.
+        ("measurements", ("how large", "size", "area", "volume", "measurement", "how big", "how many pixels")),
         ("segmentation", ("segment", "mask", "region of interest", "roi", "highlight")),
-        ("measurements", ("how large", "size", "area", "volume", "measurement", "how big")),
         ("radiomics", ("radiomic", "feature", "texture", "shape feature", "glcm")),
         ("explainability", ("grad-cam", "gradcam", "heatmap", "explain", "saliency", "why did the model")),
         ("uncertainty", ("uncertaint", "confidence", "reliab", "dispersion")),

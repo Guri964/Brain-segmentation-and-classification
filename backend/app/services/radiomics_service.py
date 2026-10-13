@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 import numpy as np
+from ..ml.region_metrics import region_geometry
 from ..ml.radiomics_native import (
     FEATURE_CATEGORIES,
     DiscretisationSettings,
@@ -324,34 +325,25 @@ class RadiomicsService:
         return groups
     @staticmethod
     def _quality(features: dict, mask: np.ndarray, dimensionality: str, mask_source: str) -> dict:
-        voxel_count = int(mask.sum())
-        bbox = _bounding_box(mask)
-        extent = None
-        if bbox:
-            extents = [high - low + 1 for low, high in bbox]
-            extent = extents
-        touching_border = any(low == 0 or high == size - 1 for (low, high), size in zip(bbox, mask.shape)) if bbox else False
+        geometry = region_geometry(mask)
         return {
             "mask_source": mask_source,
-            "roi_voxel_count": voxel_count,
-            "roi_bounding_box": bbox,
-            "roi_extent": extent,
-            "roi_touches_fov_border": bool(touching_border),
-            "relative_roi_size": float(voxel_count / mask.size),
+            "roi_voxel_count": int(geometry["voxel_count"]),
+            "roi_bounding_box": geometry["bounding_box"],
+            "roi_extent": geometry["extent"],
+            "roi_centroid": geometry["centroid"],
+            "roi_centroid_definition": (
+                "Mean coordinate of the region per mask axis, in the same axis order as "
+                "roi_bounding_box (for a 2-D mask: [row, column])."
+            ),
+            "roi_touches_fov_border": geometry["touches_border"],
+            "relative_roi_size": float(geometry["voxel_count"] / mask.size),
             "note": (
                 "Shape and texture features describe the region produced by the segmentation "
                 "model. If that region is inaccurate, every downstream value inherits the error, "
                 "which is why segmentation quality should be reviewed before the numbers are read."
             ),
         }
-def _bounding_box(mask: np.ndarray) -> list[list[int]] | None:
-    coordinates = np.argwhere(mask)
-    if coordinates.size == 0:
-        return None
-    return [
-        [int(coordinates[:, axis].min()), int(coordinates[:, axis].max())]
-        for axis in range(coordinates.shape[1])
-    ]
 def feature_tooltip(name: str) -> str:
     if name in FEATURE_DESCRIPTIONS:
         return FEATURE_DESCRIPTIONS[name]

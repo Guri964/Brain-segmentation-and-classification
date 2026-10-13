@@ -32,6 +32,7 @@ export default function SegmentationPage() {
   const { analysisId, detail, result, loading, error } = useAnalysis();
   const [activeModel, setActiveModel] = useState<string | null>(null);
   const [view, setView] = useState("masks");
+  const measurements = result?.region_measurements;
   const completedModels = useMemo(
     () =>
       Object.entries(result?.models ?? {}).filter(
@@ -411,17 +412,82 @@ export default function SegmentationPage() {
             </CardBody>
           </Card>
           <Card>
-            <CardHeader title="Regions used for measurement" />
+            <CardHeader
+              title="Abnormal region analysis"
+              subtitle="Measured from the mask itself, in pixel units"
+            />
             <CardBody className="space-y-3 text-sm">
-              <Row label="Mask source" value={result.reference_mask.source} />
+              <Row
+                label="Region detected"
+                value={
+                  <Pill tone={measurements?.detected ? "amber" : "neutral"}>
+                    {measurements?.detected ? "Yes" : "No"}
+                  </Pill>
+                }
+              />
+              <Row
+                label="Region area"
+                value={
+                  measurements?.detected
+                    ? `${formatInt(measurements.pixel_area)} px`
+                    : NOT_AVAILABLE
+                }
+              />
+              <Row
+                label="Image coverage"
+                value={
+                  measurements?.detected
+                    ? `${formatNumber(measurements.image_coverage_percent, 2)} %`
+                    : NOT_AVAILABLE
+                }
+              />
+              <Row
+                label="Bounding box"
+                value={
+                  measurements?.bounding_box
+                    ? `x=${measurements.bounding_box.x}, y=${measurements.bounding_box.y}, ` +
+                      `${measurements.bounding_box.width} x ${measurements.bounding_box.height} px`
+                    : NOT_AVAILABLE
+                }
+              />
+              <Row
+                label="Centroid (x, y)"
+                value={
+                  measurements?.centroid
+                    ? `x=${formatNumber(measurements.centroid.x, 1)}, y=${formatNumber(measurements.centroid.y, 1)}`
+                    : NOT_AVAILABLE
+                }
+              />
+              <Row
+                label="Boundary length"
+                value={
+                  measurements?.perimeter_px !== null &&
+                  measurements?.perimeter_px !== undefined
+                    ? `${formatNumber(measurements.perimeter_px, 1)} px`
+                    : NOT_AVAILABLE
+                }
+              />
+              <Row
+                label="Equivalent diameter"
+                value={
+                  measurements?.equivalent_diameter_px !== null &&
+                  measurements?.equivalent_diameter_px !== undefined
+                    ? `${formatNumber(measurements.equivalent_diameter_px, 1)} px`
+                    : NOT_AVAILABLE
+                }
+              />
+              <Row
+                label="Mask source"
+                value={measurements?.mask_source ?? result.reference_mask.source}
+              />
               <Row
                 label="Model"
                 value={result.reference_mask.model_id ?? NOT_AVAILABLE}
               />
-              <Row
-                label="Region pixels"
-                value={formatInt(result.reference_mask.foreground_pixels)}
-              />
+              <p className="prose-note">
+                {measurements?.note ??
+                  "Measurements describe the segmented region, not the patient. No anatomical, malignancy or staging statement is derived from them."}
+              </p>
               {referenceModel ? (
                 <p className="prose-note">
                   Radiomics features were computed inside this region.

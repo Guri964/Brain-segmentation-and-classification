@@ -216,6 +216,54 @@ class ReportService:
                 self.styles["Small"],
             )
         )
+        blocks.append(Spacer(1, 6))
+        blocks.extend(self._region_measurements(payload))
+        return blocks
+    def _region_measurements(self, payload: dict) -> list:
+        """Quantitative description of the region the analysis actually segmented."""
+
+        measurements = payload.get("region_measurements") or {}
+        blocks = [Paragraph("Abnormal region measurements", self.styles["Body"])]
+        if not measurements.get("detected"):
+            blocks.append(
+                Paragraph(
+                    measurements.get("note")
+                    or "No region was detected, so no region measurement is reported.",
+                    self.styles["Small"],
+                )
+            )
+            return blocks
+        bbox = measurements.get("bounding_box") or {}
+        centroid = measurements.get("centroid") or {}
+        rows = [
+            ["Region detected", "yes" if measurements.get("detected") else "no"],
+            ["Region area", f"{measurements.get('pixel_area', '-')} pixels"],
+            [
+                "Image coverage",
+                f"{_percent(measurements.get('image_coverage'))} "
+                f"({measurements.get('image_coverage_percent', '-')} % of the image)",
+            ],
+            [
+                "Bounding box (x, y, w x h)",
+                f"x={bbox.get('x', '-')}, y={bbox.get('y', '-')}, "
+                f"{bbox.get('width', '-')} x {bbox.get('height', '-')} px",
+            ],
+            [
+                "Centroid (x, y)",
+                f"x={centroid.get('x', '-')}, y={centroid.get('y', '-')} px",
+            ],
+            ["Boundary length", f"{_number(measurements.get('perimeter_px'))} px"],
+            [
+                "Equivalent diameter",
+                f"{_number(measurements.get('equivalent_diameter_px'))} px",
+            ],
+            ["Mask source", str(measurements.get("mask_source") or "-")],
+        ]
+        if measurements.get("threshold") is not None:
+            rows.append(["Decision threshold", str(measurements["threshold"])])
+        blocks.append(self._table(rows))
+        if measurements.get("note"):
+            blocks.append(Paragraph(measurements["note"], self.styles["Small"]))
         return blocks
     def _ensemble(self, payload: dict) -> list:
         ensemble = payload.get("ensemble") or {}

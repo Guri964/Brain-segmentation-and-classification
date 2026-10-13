@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 import numpy as np
 from ..errors import ModelUnavailableError, ValidationError
+from ..ml.region_metrics import measure_region
 from ..utils.images import (
     encode_png,
     make_heatmap_overlay,
@@ -372,6 +373,12 @@ class AnalysisService:
         reference_mask, mask_source, reference_model = self._select_reference_mask(
             request, member_results, ensemble_outcome
         )
+        region_measurements = measure_region(
+            reference_mask if reference_mask is not None else None,
+            source=mask_source,
+        )
+        if request.threshold != 0.5:
+            region_measurements["threshold"] = request.threshold
         radiomics_payload = None
         if request.enable_radiomics:
             emit("radiomics", "Extracting radiomics features", 65)
@@ -440,6 +447,7 @@ class AnalysisService:
                 "model_id": reference_model,
                 "foreground_pixels": int(reference_mask.sum()) if reference_mask is not None else 0,
             },
+            "region_measurements": region_measurements,
             "radiomics": radiomics_payload,
             "explainability": explainability_payload,
             "classification": classification_payload,

@@ -338,9 +338,38 @@ export interface RadiomicsQuality {
   roi_voxel_count?: number;
   roi_bounding_box?: number[][];
   roi_extent?: number[];
-  roi_touches_fov_border?: boolean;
+  /** Mean coordinate per mask axis, same axis order as roi_bounding_box. */
+  roi_centroid?: number[];
+  roi_centroid_definition?: string;
+  roi_touches_fov_border?: boolean | null;
   relative_roi_size?: number;
   note?: string;
+}
+
+/**
+ * Measurements taken from the segmentation mask itself (pixel units). They
+ * describe the region the model produced, not the patient: no anatomical,
+ * malignancy or staging statement can be derived from them.
+ */
+export interface RegionMeasurements {
+  detected: boolean;
+  pixel_area: number;
+  image_coverage: number;
+  image_coverage_percent: number;
+  bounding_box: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null;
+  centroid: { x: number; y: number } | null;
+  perimeter_px: number | null;
+  equivalent_diameter_px: number | null;
+  units: string;
+  image_size: { width: number; height: number } | null;
+  mask_source?: string | null;
+  threshold?: number;
+  note: string;
 }
 
 export interface RadiomicsFeatureSet {
@@ -475,6 +504,7 @@ export interface AnalysisPayload {
     model_id: string | null;
     foreground_pixels: number;
   };
+  region_measurements?: RegionMeasurements;
   radiomics: RadiomicsFeatureSet;
   explainability: ExplainabilityEntry[];
   classification: ClassificationResult;

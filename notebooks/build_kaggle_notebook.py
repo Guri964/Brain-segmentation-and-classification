@@ -35,6 +35,7 @@ EMBEDDED_FILES = [
     "backend/app/ml/losses.py",
     "backend/app/ml/gradcam.py",
     "backend/app/ml/radiomics_native.py",
+    "backend/app/ml/region_metrics.py",
     "backend/app/services/evaluation_service.py",
     "backend/app/services/radiomics_service.py",
     "backend/app/utils/metrics.py",

@@ -21,6 +21,7 @@ placeholder metrics and no fabricated predictions anywhere in this repository.
 | Attention U-Net (RAUNet, four channel) | Not trained; registered and reported as unavailable | `scripts/train_unet.py --architecture raunet` |
 | Probability ensemble (P = Σ wᵢ·Pᵢ) | Implemented; runs when two models share an input spec, refused otherwise | `backend/app/services/ensemble_service.py` |
 | Quantitative radiomics | Working (native extractor, 68 features on a 2-D slice) | `backend/app/services/radiomics_service.py`, `backend/app/ml/radiomics_native.py` |
+| Region measurements (area, coverage, bounding box, centroid, perimeter) | Working on every analysis, in pixel units; "not detected" when the mask is empty | `backend/app/ml/region_metrics.py` |
 | Grad-CAM explanations | Working for the single-channel U-Net | `backend/app/ml/gradcam.py`, `explainability_service.py` |
 | Feature attribution | Implemented; shown when a classifier artefact exists | `backend/app/services/classification_service.py` |
 | Uncertainty (TTA, MC dropout, ensemble disagreement) | Working (test-time augmentation) | `backend/app/services/uncertainty_service.py` |
@@ -73,6 +74,7 @@ Full instructions, including GPU setup and dataset preparation, are in
 | [docs/CURRENT_ARCHITECTURE.md](docs/CURRENT_ARCHITECTURE.md) | As-found versus target architecture |
 | [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) | Phase plan and open questions |
 | [docs/DELIVERY.md](docs/DELIVERY.md) | What was delivered: changes, structure, algorithms, results, tests, setup, limitations |
+| [docs/REQUIREMENTS_TRACEABILITY.md](docs/REQUIREMENTS_TRACEABILITY.md) | The supplied design document and modifications list (`3.pdf`, `4.pdf`) mapped row by row to the implementation, the endpoint, the UI page, the test and the honest limitation |
 
 ## 4. Repository layout
 
@@ -125,7 +127,7 @@ scripts/
 notebooks/
   brain_tumor_training_kaggle_t4.ipynb   the T4 notebook that trains and exports every model
   build_kaggle_notebook.py               regenerates the notebook from notebooks/_notebook_source/
-tests/                      pytest suite (142 tests, CPU-only)
+tests/                      pytest suite (152 tests, CPU-only)
 docs/
 data/                       runtime storage (git-ignored)
 ```
@@ -169,7 +171,7 @@ data/                       runtime storage (git-ignored)
 | Ensemble | Not available in this deployment: the two loaded checkpoints take different inputs (4×256×256 vs 1×512×512) |
 | Radiomics | 68 features extracted from the predicted region on a 2-D slice (~0.2 s), pixel-domain units only (no pixel spacing in the test input) |
 | Runtime | 0.46–0.58 s per 512×512 single-channel image on 2 CPU cores, no GPU |
-| Test suite | 142 tests, all passing, CPU-only (includes executing every cell of the Kaggle notebook end to end against the BraTS and image-classification fixtures) |
+| Test suite | 152 tests, all passing, CPU-only (includes executing every cell of the Kaggle notebook end to end against the BraTS and image-classification fixtures) |
 | Two datasets, two tasks | Segmentation and the HGG/LGG grade experiment use BraTS 2020; the multiclass tumour-type model uses the Brain Tumor MRI Dataset. Artefacts carry `task`, `label space` and `dataset` (see `data/models/models_index.json`), and the stacked ensemble refuses members from a different dataset or label space |
 | Model training provenance | Reported per model from what the training run recorded: *trained on real data* / *trained on a synthetic fixture* / *trained, not evaluated* / *trained on an unverified dataset* / *no provenance recorded*. With no manifest installed, the shipped checkpoints are reported as **no provenance recorded** — never as trained on real data |
 | Data pipeline | The notebook trains from a per-patient cache through a bounded payload store: the cache is memory-mappable (one `.npy` per member) and legacy `.npz` archives are converted in place after verification. Cell 9 measures both layouts on your data; cell 18 prints batch preparation, CPU->GPU transfer, forward, backward+step and the whole step separately, with `torch.cuda.synchronize()` and a real `nvidia-smi` sample. `docs/DELIVERY.md` §K has the measured root cause and the before/after numbers |
