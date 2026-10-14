@@ -284,14 +284,17 @@ def stacked_ensemble_run():
             "meta features cannot be reproduced.",
             details={"tensor_shape": shape},
         )
+    result = analysis.rerun_stacked_ensemble(analysis_id)
     return jsonify(
         {
             "analysis_id": analysis_id,
+            "stacked_ensemble": result,
             "status": service.status(),
+            "persisted": False,
             "hint": (
-                "Run the analysis with enable_stacked_ensemble=true to obtain a prediction; this "
-                "endpoint reports the ensemble's readiness for a stored analysis without "
-                "recomputing the members' forward passes."
+                "The three members and the head were executed again from this analysis' stored "
+                "uploads. The stored payload is not modified: pass enable_stacked_ensemble=true "
+                "on a new run to record the ensemble with the analysis."
             ),
         }
     )

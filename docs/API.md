@@ -246,7 +246,7 @@ rejected with `not_found`.
 | `POST /api/models/health-check` `{"force": false}` | Runs the reference check for every model and returns the summary |
 | `POST /api/models/compare` | Runs several models on the same upload in one request and returns each model's probability, mask and overlay as data URLs |
 | `GET /api/ensemble/stacked` | Full status of `FINAL ENSEMBLE NB.ipynb`'s stacked ensemble: every artefact with its path/size/presence, the three members with their state and parameter counts, the input contract, the ten meta-feature names, the verified contracts (46 features, 10 meta features, digests), the target semantics, the leakage note, the metrics the notebook's run printed and the provenance of those numbers |
-| `POST /api/ensemble/stacked/run` `{"analysis_id": "…"}` | Re-runs the notebook's pipeline on a stored four-channel analysis and returns the same block as the single-run endpoint. **422** without an `analysis_id` or when the analysis is not four-channel, **404** for an unknown analysis or one with no stored payload |
+| `POST /api/ensemble/stacked/run` `{"analysis_id": "…"}` | Re-runs the notebook's pipeline from a stored four-channel analysis' uploads: the three members and the head are executed again and the response carries `stacked_ensemble` plus `persisted: false` (the stored payload is never overwritten). **422** without an `analysis_id` or when the analysis is not four-channel, **404** for an unknown analysis, one with no stored payload, or one whose uploads are no longer on disk |
 
 A health report contains `verdict` (`responsive`, `no_foreground`, `saturated`,
 `degenerate`, `failed`, `not_loaded`), `responsive`, the per-check numbers

@@ -20,7 +20,7 @@ Every number below was produced by a command in this repository on the delivery 
 | Training | Colab notebook with two hard-wired paths | patient-level split builder, two training scripts with seeding, checkpointing, early stopping, LR scheduling, resume, logs; evaluation, calibration and ablation scripts |
 | BraTS 2020 support | a Colab notebook with two hard-wired paths | `inspect_brats.py` (read-only layout/key/mask/grade report), `prepare_brats.py` (patient-level manifest with leakage check), `make_brats_fixture.py` (clearly-labelled synthetic fixture), lazy on-disk data loading for HDF5 and NIfTI cases |
 | Tumour classification | disabled: 11 of 21 features, no scaler, no label vocabulary | `extract_radiomics.py` + `train_classification.py`: baseline vs improved on the same rows, patient-level splits, train-only imputation/scaling, recorded metrics, servable artefact, model card, dedicated page and PDF section |
-| Tests | none | 78 tests, CPU-only, covering preprocessing, inference, ensemble, radiomics, XAI, uncertainty, database, reports, API, frontend contract, the BraTS slice/manifest path and the classification pipeline |
+| Tests | none | 240 tests, CPU-only, covering preprocessing, inference, ensemble (probability and stacked), radiomics, XAI, uncertainty, database, reports, API, frontend contract, the BraTS slice/manifest path and the classification pipeline |
 | Docs | none | README, HOW_TO_RUN, API reference, dataset guide, limitations, algorithm notes, audit and architecture documents |
 
 Two pre-existing defects were confirmed rather than hidden: the SegNet checkpoint answers

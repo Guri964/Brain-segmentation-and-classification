@@ -350,6 +350,108 @@ class AnalysisService:
                 },
             }
 
+    def rerun_stacked_ensemble(self, analysis_id: str) -> dict:
+        """Run the notebook's head on a *stored* analysis, from its stored uploads.
+
+        This exists so an analysis that was recorded before the eight artefacts were installed can
+        still be scored, without repeating the rest of the pipeline.  Every number comes from a real
+        forward pass here; nothing is copied from the previous payload, and the stored payload is
+        **not** overwritten - the caller decides what to do with the result.
+        """
+
+        from ..errors import NotFoundError
+
+        if self.stacked_ensemble is None:
+            raise ModelUnavailableError(
+                "The stacked-ensemble service is not wired into this deployment."
+            )
+        stored = self.repository.get_analysis(analysis_id)
+        if stored is None:
+            raise NotFoundError(f"No analysis exists with identifier '{analysis_id}'.")
+        if stored.get("analysis_type") != "four_channel":
+            raise ValidationError(
+                "The stacked ensemble needs the four-channel 240x240 tensor the notebook trained "
+                f"on; this analysis is {stored.get('analysis_type')!r}.",
+                details={"analysis_type": stored.get("analysis_type")},
+            )
+        manifest = stored.get("input_manifest") or {}
+        uploads = manifest.get("uploads") or []
+        if not uploads:
+            raise ValidationError(
+                f"Analysis '{analysis_id}' records no uploads, so its four-channel tensor cannot "
+                "be rebuilt. Re-run the analysis from the original files."
+            )
+        data_dir = Path(self.config.DATA_DIR)
+        payloads: list[tuple[str, bytes]] = []
+        for entry in uploads:
+            path = data_dir / str(entry.get("path"))
+            if not path.is_file():
+                raise NotFoundError(
+                    f"The stored upload '{entry.get('path')}' is no longer on disk, so the "
+                    "stacked ensemble cannot rebuild its input."
+                )
+            payloads.append((str(entry.get("filename") or path.name), path.read_bytes()))
+        spec = _stacked_input_spec()
+        preprocessed = self.preprocessing.preprocess_four_channel(
+            payloads,
+            size=spec.height,
+            modality_names=manifest.get("modality_names") or None,
+            normalisation=NORMALISATION_PER_CHANNEL,
+        )
+        previous = self.load_payload(analysis_id) or {}
+        threshold_source = "the stored analysis payload"
+        threshold = previous.get("threshold")
+        if not isinstance(threshold, (int, float)):
+            threshold = float(getattr(self.config, "SEG_THRESHOLD", 0.5))
+            threshold_source = (
+                "the configured default - the stored analysis carries no payload of its own"
+            )
+        member_results: dict[str, object] = {}
+        unavailable: list[str] = []
+        for model_id in STACKED_MEMBERS:
+            loaded = self.registry.load_model(model_id)
+            if not loaded.is_ready:
+                unavailable.append(f"{model_id} ({loaded.status})")
+                continue
+            member_results[model_id] = self.segmentation.predict(
+                model_id, preprocessed, threshold=float(threshold)
+            )
+        if unavailable:
+            return {
+                "available": False,
+                "state": "members_unavailable",
+                "reasons": [
+                    "The meta-learner consumes one row per segmentation member and was fitted on "
+                    "three; these members are not usable here: " + ", ".join(unavailable)
+                ],
+                "members_required": list(STACKED_MEMBERS),
+            }
+        result = self._run_stacked_ensemble(
+            AnalysisRequest(files=[], analysis_type="four_channel", threshold=float(threshold)),
+            list(STACKED_MEMBERS),
+            member_results,
+            preprocessed,
+        )
+        if result.get("available"):
+            result = dict(result)
+            result["source_analysis"] = analysis_id
+            result["threshold"] = float(threshold)
+            result["threshold_source"] = threshold_source
+            result["uploads_used"] = [name for name, _ in payloads]
+            # `reused_from_analysis` on each member means "the caller supplied this prediction",
+            # which is true here as well - so name where it came from, to avoid the reading that
+            # the numbers were copied out of the stored payload.  They were not: the three members
+            # were executed again above.
+            result["member_source"] = (
+                "the three members were executed for this call from the analysis' stored uploads"
+            )
+            result["note"] = (
+                "Re-scored from the stored uploads of "
+                f"{analysis_id}: the three members and the head were executed again, and the "
+                "stored payload was left untouched."
+            )
+        return result
+
     def _default_models(self, analysis_type: str) -> list[str]:
         if analysis_type == "single_channel":
             return ["unet_dynamic_512"]

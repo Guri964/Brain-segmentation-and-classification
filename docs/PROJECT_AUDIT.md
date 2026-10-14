@@ -349,7 +349,7 @@ Findings that shaped the integration:
 
 ### 10.2 The notebook models, verified by execution
 
-`tests/test_final_ensemble.py` (38 tests, torch-only) writes stand-ins with the notebook's real
+`tests/test_final_ensemble.py` (41 tests, torch-only) writes stand-ins with the notebook's real
 architectures and exercises the whole path; `python scripts/audit_integration.py` performs the same
 kind of execution check on the real artefacts once they are installed, including one full
 end-to-end run of the pipeline on a synthetic four-channel slice.

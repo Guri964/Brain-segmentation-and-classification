@@ -86,7 +86,8 @@ origin.
 ### 2.3 Tests
 
 ```bash
-python -m pytest tests -q              # 58 tests, ~20 s on 2 CPU cores
+python -m pytest tests -q              # 240 tests, ~2.5 min on 2 CPU cores
+                                       # (10 skip without TensorFlow; they cover its serving path)
 python -m pytest tests -q -k api       # only the HTTP-level tests
 cd frontend && npm run typecheck       # TypeScript
 ```
@@ -232,7 +233,8 @@ curl -s -X POST localhost:5000/api/analysis \
 # the stored result (the dashboard reads this)
 curl -s localhost:5000/api/analysis/<analysis_id> | python -m json.tool | sed -n '/"stacked_ensemble"/,$p'
 
-# re-run the stacked head on an analysis that already has the four members
+# re-score a stored four-channel analysis with the stacked head (executes the three members and
+# the head again from that analysis' stored uploads; the stored payload is not modified)
 curl -s -X POST localhost:5000/api/ensemble/stacked/run \
   -H 'Content-Type: application/json' -d '{"analysis_id":"<analysis_id>"}' | python -m json.tool
 ```

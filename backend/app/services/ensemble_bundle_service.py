@@ -311,6 +311,7 @@ class EnsembleBundleService:
             raise ModelUnavailableError(self._artifact_error, details={"problems": problems})
 
         # ``classes_`` is a NumPy array; casting here keeps every payload JSON-serialisable.
+        # numpy integer scalars are not JSON serialisable, so the class list is cast here once
         classes = [str(value) for value in np.asarray(getattr(meta_learner, "classes_", [])).tolist()]
         self._artifacts = {
             "radiomics_cnn": cnn_state.module,

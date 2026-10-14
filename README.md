@@ -136,7 +136,7 @@ scripts/
 notebooks/
   brain_tumor_training_kaggle_t4.ipynb   the T4 notebook that trains and exports every model
   build_kaggle_notebook.py               regenerates the notebook from notebooks/_notebook_source/
-tests/                      pytest suite (152 tests, CPU-only)
+tests/                      pytest suite (240 tests, CPU-only)
 docs/
 data/                       runtime storage (git-ignored)
 ```
@@ -180,7 +180,7 @@ data/                       runtime storage (git-ignored)
 | Ensemble | Not available in this deployment: the two loaded checkpoints take different inputs (4×256×256 vs 1×512×512) |
 | Radiomics | 68 features extracted from the predicted region on a 2-D slice (~0.2 s), pixel-domain units only (no pixel spacing in the test input) |
 | Runtime | 0.46–0.58 s per 512×512 single-channel image on 2 CPU cores, no GPU |
-| Test suite | 152 tests, all passing, CPU-only (includes executing every cell of the Kaggle notebook end to end against the BraTS and image-classification fixtures) |
+| Test suite | 240 tests, all passing, CPU-only (includes executing every cell of the Kaggle notebook end to end against the BraTS and image-classification fixtures, and the stacked-ensemble suite) |
 | Two datasets, two tasks | Segmentation and the HGG/LGG grade experiment use BraTS 2020; the multiclass tumour-type model uses the Brain Tumor MRI Dataset. Artefacts carry `task`, `label space` and `dataset` (see `data/models/models_index.json`), and the stacked ensemble refuses members from a different dataset or label space |
 | Model training provenance | Reported per model from what the training run recorded: *trained on real data* / *trained on a synthetic fixture* / *trained, not evaluated* / *trained on an unverified dataset* / *no provenance recorded*. With no manifest installed, the shipped checkpoints are reported as **no provenance recorded** — never as trained on real data |
 | Data pipeline | The notebook trains from a per-patient cache through a bounded payload store: the cache is memory-mappable (one `.npy` per member) and legacy `.npz` archives are converted in place after verification. Cell 9 measures both layouts on your data; cell 18 prints batch preparation, CPU->GPU transfer, forward, backward+step and the whole step separately, with `torch.cuda.synchronize()` and a real `nvidia-smi` sample. `docs/DELIVERY.md` §K has the measured root cause and the before/after numbers |

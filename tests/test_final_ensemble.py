@@ -756,6 +756,85 @@ def test_the_stacked_ensemble_runs_through_the_analysis_api(notebook_client):
     assert payload["analysis_id"].startswith("an-")
 
 
+def test_the_run_endpoint_rescores_a_stored_analysis(notebook_client):
+    """``POST /api/ensemble/stacked/run`` executes the members and the head again.
+
+    The result must agree with the one the analysis recorded (same inputs, same weights), and the
+    stored payload must be left untouched.
+    """
+
+    from werkzeug.datastructures import MultiDict
+
+    rng = np.random.default_rng(11)
+    size = 240
+    grid = np.mgrid[0:size, 0:size]
+    lesion = np.exp(-(((grid[0] - size / 2) ** 2 + (grid[1] - size / 2) ** 2) / (2 * (size * 0.08) ** 2)))
+    form = MultiDict(
+        [
+            ("analysis_type", "four_channel"),
+            ("enable_stacked_ensemble", "true"),
+            ("enable_radiomics", "false"),
+            ("enable_ensemble", "false"),
+            ("enable_explainability", "false"),
+        ]
+    )
+    for index, gain in enumerate([1.0, 1.15, 0.85, 1.3]):
+        array = np.clip(rng.normal(0.35, 0.08, size=(size, size)) + lesion * 0.6 * gain, 0, 1)
+        buffer = io.BytesIO()
+        Image.fromarray((array * 255).astype(np.uint8)).save(buffer, format="PNG")
+        form.add("files", (io.BytesIO(buffer.getvalue()), f"rerun_{index}.png"))
+
+    created = notebook_client.post("/api/analysis", data=form, content_type="multipart/form-data")
+    assert created.status_code == 201, created.get_json()
+    payload = created.get_json()
+    analysis_id = payload["analysis_id"]
+    stored = payload["stacked_ensemble"]
+    assert stored["available"] is True, stored.get("reasons")
+
+    response = notebook_client.post(
+        "/api/ensemble/stacked/run", json={"analysis_id": analysis_id}
+    )
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert body["persisted"] is False
+    rerun = body["stacked_ensemble"]
+    assert rerun["available"] is True, rerun.get("reasons")
+
+    # same input, same weights -> the same numbers, and all three members were executed for real
+    assert rerun["prediction"] == stored["prediction"]
+    assert rerun["meta_features"] == stored["meta_features"]
+    assert rerun["consensus"]["foreground_pixels"] == stored["consensus"]["foreground_pixels"]
+    assert rerun["member_source"] == (
+        "the three members were executed for this call from the analysis' stored uploads"
+    )
+    assert rerun["source_analysis"] == analysis_id
+    assert rerun["uploads_used"] == [f"rerun_{index}.png" for index in range(4)]
+
+    # the stored payload still holds the original result
+    again = notebook_client.get(f"/api/analysis/{analysis_id}").get_json()["result"]
+    assert again["stacked_ensemble"]["meta_features"] == stored["meta_features"]
+
+
+def test_the_run_endpoint_refuses_a_single_channel_analysis(notebook_client):
+    buffer = io.BytesIO()
+    rng = np.random.default_rng(12)
+    Image.fromarray((rng.random((256, 256)) * 255).astype(np.uint8)).save(buffer, format="PNG")
+    created = notebook_client.post(
+        "/api/analysis",
+        data={
+            "analysis_type": "single_channel",
+            "files": (io.BytesIO(buffer.getvalue()), "one.png"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert created.status_code == 201, created.get_json()
+    analysis_id = created.get_json()["analysis_id"]
+    response = notebook_client.post("/api/ensemble/stacked/run", json={"analysis_id": analysis_id})
+    assert response.status_code == 422
+    error = response.get_json()["error"]
+    assert "single_channel" in error["message"]
+
+
 def test_the_analysis_api_refuses_the_stacked_ensemble_on_a_single_channel_upload(notebook_client):
     rng = np.random.default_rng(4)
     buffer = io.BytesIO()
