@@ -231,7 +231,54 @@ imputing a column would feed it a distribution it never saw. The record of the n
 table the value is the member's Dice, not a classification accuracy, which is exactly the kind of
 misreading the provenance strings exist to prevent.
 
-## 22. Not a medical device
+## 22. The `.pkl` artefacts are read by resolving names and completing the loss object, never by rewriting the file
+
+A pickle records the module path and class name of the environment that wrote it. scikit-learn has
+since moved the gradient-boosting losses (`sklearn.ensemble._gb_losses` → `sklearn._loss.loss`) and
+renamed some loss classes (`BinomialDeviance` → `HalfBinomialLoss`, `LeastSquaresError` →
+`HalfSquaredError`), and NumPy 2 renamed `numpy.core` to `numpy._core`. An artefact from the
+notebook's environment can therefore raise `ModuleNotFoundError` on a healthy installation -
+`No module named '_loss'` on `models/weights/meta_learner.pkl` is that case, not a corrupt file.
+
+What this deployment does about it (`app/ml/pickle_compat.py`):
+
+* a module path that no longer exists is aliased, for the duration of the load only, to the module
+  that holds the same class here. A class that keeps its name needs no other evidence, and for NumPy
+  the rename resolves to the identical object;
+* the loss object the file carries is completed when the release that wrote it shaped that object
+  differently. This is the second half of the `_loss` failure: a scikit-learn 1.3 artefact restores a
+  `BinomialDeviance` whose only attribute is `K`, while the installed `HalfBinomialLoss` sets nine
+  attributes in `__init__` and computes every probability through `link`, so the file loads and then
+  fails at the first prediction. The object is replaced by `GradientBoostingClassifier._get_loss()`
+  - scikit-learn's own construction of the declared loss, whose own table decides which class
+  implements it for this number of classes - and the attributes that were dropped are reported.
+  Measured against a genuine 1.3.2 artefact (200 trees, depth 3, `loss='log_loss'`) in a throwaway
+  environment with scikit-learn 1.3.2 / NumPy 1.26: after the rebuild the meta-learner returns the
+  same labels and the same probabilities as the environment that wrote it, maximum absolute
+  difference `1.11e-16`, i.e. one unit in the last place. The fitted trees, `init_` and every
+  parameter of the estimator are left exactly as the file has them;
+* a *renamed class* is substituted only when the estimator's own declared `loss` is implemented by
+  the substituted class (and its link). If it is not, the artefact is refused and the ensemble
+  reports `incompatible` with the declared loss in the message, because running the head on a
+  different loss would silently change every number it produces;
+* every substitution is reported - `contracts.artifacts_read` in `/api/ensemble/stacked`, in each
+  prediction's `artifacts_read`, and in the audit report - together with the class paths the file
+  records that this environment does not have;
+* a path with no equivalent here is refused with the module name
+  (`error.details.missing_module`), never guessed around; a loss object that cannot be completed is
+  refused with the attributes it is missing rather than run half-built;
+* the artefact is opened read-only and never re-written, re-exported or retrained. A regression
+  test (`tests/test_final_ensemble.py`) writes a meta-learner of each legacy shape into a temporary
+  directory, checks that a plain `joblib.load` fails on it, and loads it through the service; the
+  rebuilt-loss case is checked by comparing the probabilities with the model the file was written
+  from, bit for bit.
+
+This makes the *reading* portable, not the numbers: nothing here verifies that the installed
+scikit-learn would have reproduced the same probabilities at training time, and no reported metric
+is re-measured. It also means an artefact whose loss class had no equivalent at all would be refused
+rather than approximated - which is the intended behaviour.
+
+## 23. Not a medical device
 
 No part of this software has been reviewed, cleared or approved as a medical device.
 It is a research prototype. Outputs are AI-generated and are not intended to replace

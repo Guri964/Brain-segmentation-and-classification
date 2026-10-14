@@ -107,7 +107,7 @@ data** (the code refuses to run rather than guessing).
    (`tests/tf_image_classifier_driver.py`) because importing TensorFlow and then `torch.compile`
    crashes this environment; see `docs/LIMITATIONS.md` §16.
 
-Test suite: 240 tests, all passing (CPU only; 10 skip without TensorFlow). Frontend: `tsc --noEmit` clean,
+Test suite: 251 tests, all passing (CPU only; 10 skip without TensorFlow). Frontend: `tsc --noEmit` clean,
 `npm run build` = 888.37 kB JS (252.13 kB gzip) + 38.49 kB CSS.
 
 ---

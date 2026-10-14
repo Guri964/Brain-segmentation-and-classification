@@ -58,6 +58,7 @@ from pathlib import Path
 import numpy as np
 
 from ..errors import DependencyMissingError, ModelUnavailableError, ValidationError
+from ..ml import pickle_compat
 from ..ml import radiomics_notebook
 from ..ml.radiomics_notebook import LEAKAGE_NOTE, TARGET_SEMANTICS, feature_order
 
@@ -203,6 +204,22 @@ class EnsembleBundleService:
             ) from exc
         return joblib
 
+    def _read_artifact(self, path: str | Path, label: str) -> tuple[object, dict]:
+        """Read one joblib artefact, resolving only library name changes and reporting them.
+
+        ``pickle_compat`` is used instead of a bare ``joblib.load`` because a pickle stores the
+        module path of the environment that wrote the artefact.  scikit-learn moved the gradient
+        boosting losses (``sklearn.ensemble._gb_losses`` -> ``sklearn._loss.loss``) and NumPy
+        renamed ``numpy.core`` (-> ``numpy._core``), so a file written elsewhere can raise
+        ``ModuleNotFoundError`` here, which reads like a broken installation but is only a rename
+        inside a healthy library.  The second item of the returned pair is the load report: what the
+        file records, what had to be resolved differently, and what could not be resolved at all.
+        """
+
+        if self._loader is not None:  # injection point for tests
+            return self._loader(path), {"artefact": label, "loader": "injected"}
+        return pickle_compat.load(path, artefact=label)
+
     def _file_digest(self, path: Path, *, limit: int = 1 << 20) -> str:
         """A short digest of the artefact, so a payload can name the exact bytes it used."""
 
@@ -235,14 +252,31 @@ class EnsembleBundleService:
                 },
             )
 
-        joblib = self._joblib()
+        self._joblib()  # presence check; the compatibility loader imports joblib itself
         specs = {entry["key"]: entry for entry in self.artifact_status()}
         # The scalers and the meta-learner are joblib objects; the CNN is a torch state dict
         # and is loaded (and shape-checked) by the registry, not here.
+        # They are read through ``pickle_compat`` because a pickle records the module path of the
+        # environment that wrote it: an artefact saved where scikit-learn's gradient-boosting losses
+        # lived in another module raises ``ModuleNotFoundError`` here even though both environments
+        # are healthy.  Every name that had to be resolved differently is reported in
+        # ``self._artifacts["reading"]`` and travels with the status and every prediction.
         try:
-            radiomics_scaler = joblib.load(specs["radiomics_scaler"]["path"])
-            meta_scaler = joblib.load(specs["meta_scaler"]["path"])
-            meta_learner = joblib.load(specs["meta_learner"]["path"])
+            reading: dict[str, dict] = {}
+            radiomics_scaler, reading[specs["radiomics_scaler"]["file"]] = self._read_artifact(
+                specs["radiomics_scaler"]["path"], specs["radiomics_scaler"]["file"]
+            )
+            meta_scaler, reading[specs["meta_scaler"]["file"]] = self._read_artifact(
+                specs["meta_scaler"]["path"], specs["meta_scaler"]["file"]
+            )
+            meta_learner, reading[specs["meta_learner"]["file"]] = self._read_artifact(
+                specs["meta_learner"]["path"], specs["meta_learner"]["file"]
+            )
+        except ModelUnavailableError as exc:
+            self._artifact_error = (
+                "the ensemble artefacts could not be read - " + exc.message
+            )
+            raise ModelUnavailableError(self._artifact_error, details=exc.details) from exc
         except Exception as exc:  # noqa: BLE001 - reported, never guessed around
             self._artifact_error = (
                 f"the ensemble artefacts could not be read: {type(exc).__name__}: {exc}"
@@ -325,6 +359,9 @@ class EnsembleBundleService:
             },
             "sizes": {key: entry["size_bytes"] for key, entry in specs.items()},
             "meta_classes": classes,
+            # How each artefact was read, and which of the class paths it records had to be
+            # resolved against another module name.  Empty substitutions mean a plain joblib load.
+            "reading": reading,
         }
         self._checked_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         return self._artifacts
@@ -413,6 +450,10 @@ class EnsembleBundleService:
                     "meta_features": META_FEATURE_COUNT,
                     "meta_classes": loaded["meta_classes"],
                     "artifact_digests": loaded["digests"],
+                    "artifacts_read": {
+                        label: pickle_compat.summary(report)
+                        for label, report in loaded.get("reading", {}).items()
+                    },
                 }
             except ModelUnavailableError as exc:
                 state = "incompatible"
@@ -686,6 +727,10 @@ class EnsembleBundleService:
             "metrics_provenance": METRICS_PROVENANCE,
             "artifact_digests": loaded["digests"],
             "artifact_sizes": loaded["sizes"],
+            "artifacts_read": {
+                label: pickle_compat.summary(report)
+                for label, report in loaded.get("reading", {}).items()
+            },
             "meta_classes": loaded["meta_classes"],
             "inference_seconds": round(time.perf_counter() - started, 4),
             "label_semantics": TARGET_SEMANTICS,

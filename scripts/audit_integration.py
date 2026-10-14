@@ -581,6 +581,30 @@ def render(report: dict) -> str:
             f"meta features={contracts.get('meta_features')} "
             f"classes={contracts.get('meta_classes')}"
         )
+    reading = (stacked.get("contracts") or {}).get("artifacts_read") or {}
+    for label, load_report in sorted(reading.items()):
+        resolved = load_report.get("resolved_from_other_modules") or []
+        unresolved = [
+            item["class_path"]
+            for item in (load_report.get("class_paths_missing_here") or [])
+            if not item.get("resolved_as")
+        ]
+        if not resolved and not unresolved:
+            continue
+        # A file written by another environment is read by resolving the module names it records.
+        # The substitutions are printed because a reader has to see which class produced a number;
+        # a name nothing here can stand in for is printed because it is why a load would fail.
+        because = "; ".join(f"{item['requested']} -> {item['resolved']}" for item in resolved)
+        if unresolved:
+            because += ("; " if because else "") + "no equivalent here: " + ", ".join(unresolved)
+        rebuilt = load_report.get("loss_rebuilt")
+        if rebuilt:
+            because += ("; " if because else "") + (
+                f"its loss object carried {rebuilt['restored_attributes']} and was rebuilt as "
+                f"{rebuilt['installed_class']} for the declared loss '{rebuilt['declared_loss']}'"
+            )
+        for line in _wrap(because, f"  artefact read: {label} "):
+            add(line)
     add(f"  meta columns : {', '.join(stacked['meta_features'])}")
     run = stacked.get("pipeline_run")
     if run and "error" in run:

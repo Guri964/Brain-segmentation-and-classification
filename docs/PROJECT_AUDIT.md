@@ -349,10 +349,19 @@ Findings that shaped the integration:
 
 ### 10.2 The notebook models, verified by execution
 
-`tests/test_final_ensemble.py` (41 tests, torch-only) writes stand-ins with the notebook's real
+`tests/test_final_ensemble.py` (52 tests, torch-only) writes stand-ins with the notebook's real
 architectures and exercises the whole path; `python scripts/audit_integration.py` performs the same
 kind of execution check on the real artefacts once they are installed, including one full
 end-to-end run of the pipeline on a synthetic four-channel slice.
+
+The three `.pkl` artefacts are read through `backend/app/ml/pickle_compat.py`, which resolves the
+module paths a pickle records when the library that wrote it has since renamed them
+(`sklearn.ensemble._gb_losses` → `sklearn._loss.loss`, `numpy.core` → `numpy._core`, and the
+gradient-boosting loss class names of earlier releases). A renamed *class* is substituted only when
+the estimator's own declared `loss` agrees with the substitute; a loss *object* that an older release
+shaped differently is completed with scikit-learn's own construction of the declared loss (reported
+as `loss_rebuilt`). Everything substituted or rebuilt is printed in the status, in each prediction
+and in this audit report, and the artefact itself is never rewritten.
 
 | Check | Result |
 | --- | --- |

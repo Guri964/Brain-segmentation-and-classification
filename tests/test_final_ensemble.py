@@ -851,3 +851,460 @@ def test_the_analysis_api_refuses_the_stacked_ensemble_on_a_single_channel_uploa
     assert response.status_code == 422
     message = response.get_json()["error"]["message"]
     assert "four-channel" in message
+
+
+# ------------------------------------------- artefacts written by another environment
+#
+# A pickle records the *module path* of the environment that wrote it, so an artefact that is
+# perfectly healthy can stop loading after a library renames one of its private modules - which is
+# what ``ModuleNotFoundError: No module named '_loss'`` is: scikit-learn's gradient-boosting losses
+# used to be importable from ``sklearn.ensemble._gb_losses`` (and from a bare ``_loss``), and this
+# deployment keeps them in ``sklearn._loss.loss``.  The tests below write such a file into a
+# temporary directory (no artefact in the repository is touched, nothing is retrained, no trained
+# file is overwritten) and go through the real service to show that the ensemble still loads it,
+# that what was substituted is reported, and that a substitution the estimator disagrees with is
+# refused rather than used.
+
+def _meta_learner_fixture(notebook_weights: Path):
+    """The fixture meta-learner itself, loaded so a copy of it can be written under other names."""
+
+    import joblib
+
+    return joblib.load(notebook_weights / "meta_learner.pkl")
+
+
+def write_copy_with_loss_named(model, path: Path, module_name: str, attribute: str) -> Path:
+    """Write a copy of ``model`` whose loss class looks like it lives in ``module_name``.
+
+    The class object is unchanged; only the text a pickle would record for it is, for the duration
+    of the dump.  That is exactly the difference between the artefact this deployment can read and
+    one it cannot, so it is what the regression test has to reproduce.
+    """
+
+    import sys
+    import types
+
+    import joblib
+
+    cls = type(model._loss)
+    original = (cls.__module__, cls.__name__, cls.__qualname__)
+    shim = types.ModuleType(module_name)
+    setattr(shim, attribute, cls)
+    sys.modules[module_name] = shim
+    cls.__module__, cls.__name__, cls.__qualname__ = module_name, attribute, attribute
+    try:
+        joblib.dump(model, path, compress=0, protocol=2)
+    finally:
+        cls.__module__, cls.__name__, cls.__qualname__ = original
+        sys.modules.pop(module_name, None)
+    return path
+
+
+class HeadWithoutLossFactory:
+    """A stand-in whose loss object cannot be completed here, for the refusal path.
+
+    Defined at module level so a pickle can name it, and used by one test only: it carries the
+    ``_loss`` attribute the repair looks for but none of the machinery scikit-learn's
+    ``GradientBoostingClassifier`` has to rebuild it with.
+    """
+
+    def __init__(self, loss):
+        self._loss = loss
+        self.loss = "log_loss"
+
+
+def strip_loss_state(model):
+    """Give ``model`` the loss object an older release's pickle would have carried.
+
+    A scikit-learn 1.3 meta-learner restores a ``BinomialDeviance`` whose only attribute is ``K``,
+    while this release's ``HalfBinomialLoss`` sets nine attributes in ``__init__`` - so a file can
+    load and then fail at the first prediction with ``'HalfBinomialLoss' object has no attribute
+    'link'``.  Returns the model's own loss object so the caller can put it back.
+    """
+
+    complete = model._loss
+    old_shaped = type(complete)()
+    vars(old_shaped).clear()
+    old_shaped.K = 2
+    model._loss = old_shaped
+    return complete
+
+
+def config_with_meta_learner(notebook_config, path: Path):
+    """The notebook config, with only the meta-learner pointing somewhere else."""
+
+    class LegacyHeadConfig(notebook_config):
+        META_LEARNER_PATH = str(path)
+
+    return LegacyHeadConfig
+
+
+def test_a_pickle_that_names_a_module_this_environment_lacks_is_refused_by_name(tmp_path):
+    """The failure has to name the module, not surface as a traceback."""
+
+    import sys
+    import types
+
+    import joblib
+
+    from app.ml import pickle_compat
+
+    class ForeignScaler:
+        pass
+
+    # a pickle writes ``__qualname__``, so a class defined inside a test needs both set
+    ForeignScaler.__qualname__ = "ForeignScaler"
+    ForeignScaler.__module__ = "no_such_radiomics_library_xyz"
+    shim = types.ModuleType("no_such_radiomics_library_xyz")
+    shim.ForeignScaler = ForeignScaler
+    sys.modules["no_such_radiomics_library_xyz"] = shim
+    target = tmp_path / "foreign.pkl"
+    try:
+        joblib.dump({"scaler": ForeignScaler()}, target, compress=0, protocol=2)
+    finally:
+        sys.modules.pop("no_such_radiomics_library_xyz", None)
+
+    with pytest.raises(ModelUnavailableError) as error:
+        pickle_compat.load(target, artefact="foreign.pkl")
+    assert error.value.details["missing_module"] == "no_such_radiomics_library_xyz"
+    assert "no_such_radiomics_library_xyz" in error.value.message
+
+
+def test_a_modern_artefact_is_read_without_any_substitution(notebook_weights):
+    """The compatibility loader is a no-op for a file written by this environment."""
+
+    from app.ml import pickle_compat
+
+    value, report = pickle_compat.load(notebook_weights / "meta_learner.pkl", artefact="meta_learner.pkl")
+    assert report["loader"] == "joblib"
+    assert report["substitutions"] == []
+    assert report["aliased_modules"] == []
+    summary = pickle_compat.summary(report)
+    assert summary["class_paths_missing_here"] == []
+    assert summary["container"].startswith("joblib")
+    assert report["protocol"] is not None
+    assert hasattr(value, "predict_proba")
+
+
+def test_a_meta_learner_whose_loss_module_moved_still_loads_and_is_reported(
+    notebook_config, notebook_weights, tmp_path
+):
+    """The reported failure, reproduced and resolved.
+
+    ``sklearn.ensemble._gb_losses`` is where scikit-learn used to keep the gradient-boosting losses;
+    it is not importable in this environment, so a plain ``joblib.load`` of such a file raises
+    ``ModuleNotFoundError`` and the ensemble reads as unusable.  The service must instead load it
+    through the compatibility loader, produce the same probabilities as the original, and say in
+    the payload that the class was resolved from another module.  The file's bytes are checked
+    before and after, because the artefact must never be rewritten.
+    """
+
+    import hashlib
+
+    import joblib
+    from sklearn.ensemble import GradientBoostingClassifier
+
+    from app.services.segmentation_service import SegmentationService
+
+    model = _meta_learner_fixture(notebook_weights)
+    assert isinstance(model, GradientBoostingClassifier)
+    copy = write_copy_with_loss_named(
+        model, tmp_path / "meta_learner.pkl", "sklearn.ensemble._gb_losses", type(model._loss).__name__
+    )
+    before = hashlib.sha256(copy.read_bytes()).hexdigest()
+
+    # the artefact as written: a plain load cannot read it, and says which module it wanted
+    with pytest.raises(ModuleNotFoundError) as error:
+        joblib.load(copy)
+    assert "sklearn.ensemble._gb_losses" in str(error.value)
+
+    config = config_with_meta_learner(notebook_config, copy)
+    registry = ModelRegistry(config)
+    bundle = EnsembleBundleService(config, registry, SegmentationService(registry, config))
+
+    assert bundle.status()["state"] == "ready", bundle.status()["reason"]
+    loaded = bundle.load_artifacts()
+    reading = loaded["reading"]["meta_learner.pkl"]
+    assert reading["aliased_modules"] == ["sklearn.ensemble._gb_losses"]
+    assert reading["substitutions"] == [
+        {
+            "requested": "sklearn.ensemble._gb_losses.HalfBinomialLoss",
+            "resolved": "sklearn._loss.loss.HalfBinomialLoss",
+            "renamed_class": False,
+        }
+    ]
+
+    # the same model, and therefore the same numbers, as the fixture the deployment ships
+    probe = np.arange(META_FEATURE_COUNT, dtype=np.float64).reshape(1, -1)
+    assert np.array_equal(
+        loaded["meta_learner"].predict_proba(probe), model.predict_proba(probe)
+    )
+    assert hashlib.sha256(copy.read_bytes()).hexdigest() == before
+
+
+def test_the_bare_loss_module_of_the_reported_error_is_resolved_and_named(
+    notebook_config, notebook_weights, tmp_path
+):
+    """``ModuleNotFoundError: No module named '_loss'`` verbatim, then resolved."""
+
+    import joblib
+
+    from app.services.segmentation_service import SegmentationService
+
+    model = _meta_learner_fixture(notebook_weights)
+    copy = write_copy_with_loss_named(model, tmp_path / "meta_learner.pkl", "_loss", "HalfBinomialLoss")
+
+    with pytest.raises(ModuleNotFoundError) as error:
+        joblib.load(copy)
+    assert str(error.value) == "No module named '_loss'"
+
+    config = config_with_meta_learner(notebook_config, copy)
+    registry = ModelRegistry(config)
+    bundle = EnsembleBundleService(config, registry, SegmentationService(registry, config))
+
+    status = bundle.status()
+    assert status["state"] == "ready", status["reason"]
+    reading = status["contracts"]["artifacts_read"]["meta_learner.pkl"]
+    assert reading["aliased_modules"] == ["_loss"]
+    assert reading["class_paths_missing_here"] == [
+        {
+            "class_path": "_loss.HalfBinomialLoss",
+            "source": "tokens",
+            "resolved_as": "sklearn._loss.HalfBinomialLoss",
+        }
+    ]
+    resolved = reading["resolved_from_other_modules"][0]["resolved"]
+    assert resolved.endswith(".HalfBinomialLoss")
+    # ``sklearn._loss`` re-exports the class from ``sklearn._loss.loss``, so either path is the same
+    # object - and it has to be the very class the fixture's meta-learner was fitted with
+    module_path, _, attribute = resolved.rpartition(".")
+    import importlib
+
+    assert getattr(importlib.import_module(module_path), attribute) is type(model._loss)
+    assert bundle.load_artifacts()["meta_learner"].n_features_in_ == META_FEATURE_COUNT
+
+
+def test_a_loss_class_name_from_an_older_release_is_resolved_and_noted(
+    notebook_config, notebook_weights, tmp_path
+):
+    """``BinomialDeviance`` was the old name for the class this build calls ``HalfBinomialLoss``."""
+
+    from app.services.segmentation_service import SegmentationService
+
+    model = _meta_learner_fixture(notebook_weights)
+    copy = write_copy_with_loss_named(
+        model, tmp_path / "meta_learner.pkl", "sklearn.ensemble._gb_losses", "BinomialDeviance"
+    )
+    config = config_with_meta_learner(notebook_config, copy)
+    registry = ModelRegistry(config)
+    bundle = EnsembleBundleService(config, registry, SegmentationService(registry, config))
+
+    loaded = bundle.load_artifacts()
+    note = loaded["reading"]["meta_learner.pkl"]["compatibility_notes"][0]
+    assert "log_loss" in note and "HalfBinomialLoss" in note and "agrees" in note
+    probe = np.arange(META_FEATURE_COUNT, dtype=np.float64).reshape(1, -1)
+    assert np.array_equal(loaded["meta_learner"].predict_proba(probe), model.predict_proba(probe))
+
+
+def test_a_substituted_loss_is_refused_when_the_declared_loss_disagrees(
+    notebook_config, notebook_weights, tmp_path
+):
+    """A class substitution is only trusted when the estimator's own declared loss agrees.
+
+    The file here declares the exponential loss but names the binomial deviance for its loss object.
+    Resolving that name would hand the estimator a different loss than the one it was fitted with,
+    so the artefact has to be refused - and reported as incompatible, not as a crash.
+    """
+
+    from sklearn.ensemble import GradientBoostingClassifier
+
+    from app.services.segmentation_service import SegmentationService
+
+    rng = np.random.default_rng(5)
+    matrix = rng.normal(size=(64, META_FEATURE_COUNT))
+    model = GradientBoostingClassifier(loss="exponential", n_estimators=10, random_state=0)
+    model.fit(matrix, (matrix[:, 0] > 0).astype(int))
+    assert model.loss == "exponential"
+
+    copy = write_copy_with_loss_named(
+        model, tmp_path / "meta_learner.pkl", "sklearn.ensemble._gb_losses", "BinomialDeviance"
+    )
+    config = config_with_meta_learner(notebook_config, copy)
+    registry = ModelRegistry(config)
+    bundle = EnsembleBundleService(config, registry, SegmentationService(registry, config))
+
+    with pytest.raises(ModelUnavailableError) as error:
+        bundle.load_artifacts()
+    assert error.value.details["declared_loss"] == "exponential"
+
+    status = bundle.status(force=True)
+    assert status["state"] == "incompatible"
+    assert "exponential" in status["reason"]
+
+
+def test_a_count_of_references_is_never_claimed_for_an_unreadable_stream(notebook_config, notebook_weights):
+    """``describe`` reports where its walk stopped instead of implying it saw the whole file."""
+
+    from app.ml import pickle_compat
+
+    info = pickle_compat.describe(notebook_weights / "meta_learner.pkl")
+    assert info["inspected_bytes"] == info["bytes"]
+    assert any("opcodes read" in note for note in info["reading"])
+    assert all(row["source"] in {"opcodes", "tokens"} for row in info["references"])
+    assert "sklearn.ensemble._gb.GradientBoostingClassifier" in {
+        f"{row['module']}.{row['name']}" for row in info["references"]
+    }
+
+
+def test_an_old_shaped_loss_object_is_rebuilt_so_the_head_can_still_predict(
+    notebook_config, notebook_weights, tmp_path
+):
+    """The second half of the ``_loss`` failure: the loss *state* is old, not just its module.
+
+    The file here carries what a scikit-learn 1.3 artefact carries - a loss whose only attribute is
+    ``K`` - under a class name from an earlier release.  Loading it is not enough; the installed
+    class computes every probability through attributes that object never had, so the service has to
+    complete it.  It must do so with scikit-learn's own construction of the declared loss, keep the
+    fitted trees, and return the same numbers as the model the file was written from.
+    """
+
+    import joblib
+
+    from app.services.segmentation_service import SegmentationService
+
+    model = _meta_learner_fixture(notebook_weights)
+    probe = np.arange(META_FEATURE_COUNT, dtype=np.float64).reshape(1, -1)
+    expected = model.predict_proba(probe)
+
+    complete_loss = strip_loss_state(model)
+    copy = write_copy_with_loss_named(
+        model, tmp_path / "meta_learner.pkl", "sklearn.ensemble._gb_losses", "BinomialDeviance"
+    )
+    model._loss = complete_loss  # the fixture is whole again; only the file on disk is old-shaped
+
+    # the file as written: a plain load cannot even find the module, and the restored loss has none
+    # of the attributes a prediction needs
+    with pytest.raises(ModuleNotFoundError):
+        joblib.load(copy)
+
+    config = config_with_meta_learner(notebook_config, copy)
+    registry = ModelRegistry(config)
+    bundle = EnsembleBundleService(config, registry, SegmentationService(registry, config))
+
+    status = bundle.status()
+    assert status["state"] == "ready", status["reason"]
+    rebuilt = status["contracts"]["artifacts_read"]["meta_learner.pkl"]["loss_rebuilt"]
+    assert rebuilt["restored_class"] == type(complete_loss).__name__
+    assert rebuilt["restored_attributes"] == ["K"]
+    assert "link" in rebuilt["missing_attributes"]
+    assert rebuilt["installed_class"] == type(complete_loss).__name__
+    assert rebuilt["declared_loss"] == "log_loss"
+
+    loaded = bundle.load_artifacts()
+    assert np.array_equal(loaded["meta_learner"].predict_proba(probe), expected)
+    assert loaded["meta_learner"]._loss.link is not None
+
+
+def test_a_loss_object_that_cannot_be_rebuilt_is_refused(notebook_weights, tmp_path):
+    """Nothing is half-built: a loss object with no way to complete it stops the load."""
+
+    import joblib
+
+    from app.ml import pickle_compat
+
+    model = _meta_learner_fixture(notebook_weights)
+    complete_loss = strip_loss_state(model)
+    old_shaped = model._loss
+    model._loss = complete_loss
+    path = tmp_path / "foreign_head.pkl"
+    joblib.dump(HeadWithoutLossFactory(old_shaped), path)
+
+    with pytest.raises(ModelUnavailableError) as error:
+        pickle_compat.load(path, artefact="foreign_head.pkl")
+    assert "link" in error.value.details["missing_attributes"]
+    assert error.value.details["class"] == type(complete_loss).__name__
+
+
+def test_a_modern_artefact_is_reported_as_needing_no_repair(notebook_config, notebook_weights):
+    """The rebuild is a response to the file, not something applied to every load."""
+
+    from app.services.segmentation_service import SegmentationService
+
+    registry = ModelRegistry(notebook_config)
+    bundle = EnsembleBundleService(
+        notebook_config, registry, SegmentationService(registry, notebook_config)
+    )
+    reading = bundle.load_artifacts()["reading"]["meta_learner.pkl"]
+    assert reading["loader"] == "joblib"
+    assert reading["loss_rebuilt"] is None
+    assert reading["compatibility_notes"] == []
+
+
+@pytest.mark.skipif(not monai_available(), reason="install monai to run the notebook's U-Net member")
+def test_the_whole_pipeline_runs_on_a_meta_learner_written_by_another_environment(
+    notebook_config, notebook_weights, tmp_path
+):
+    """The HTTP path, with a head artefact that only loads because of the compatibility loader."""
+
+    from app import create_app
+    from werkzeug.datastructures import MultiDict
+
+    model = _meta_learner_fixture(notebook_weights)
+    complete_loss = strip_loss_state(model)  # what a scikit-learn 1.3 file carries
+    copy = write_copy_with_loss_named(
+        model, tmp_path / "meta_learner.pkl", "sklearn.ensemble._gb_losses", "BinomialDeviance"
+    )
+    model._loss = complete_loss
+    config = config_with_meta_learner(notebook_config, copy)
+
+    class ApiConfig(config):
+        DATA_DIR = tmp_path / "legacy-api-data"
+        LOG_DIR = tmp_path / "legacy-api-data" / "logs"
+
+    ApiConfig.init_directories()
+    application = create_app(config_object=ApiConfig, env="testing")
+    application.config.update(TESTING=True)
+    client = application.test_client()
+
+    status = client.get("/api/ensemble/stacked").get_json()
+    assert status["available"] is True, status["reason"]
+    assert status["contracts"]["artifacts_read"]["meta_learner.pkl"]["aliased_modules"] == [
+        "sklearn.ensemble._gb_losses"
+    ]
+
+    rng = np.random.default_rng(21)
+    size = 240
+    grid = np.mgrid[0:size, 0:size]
+    lesion = np.exp(-(((grid[0] - size / 2) ** 2 + (grid[1] - size / 2) ** 2) / (2 * (size * 0.08) ** 2)))
+    form = MultiDict(
+        [
+            ("analysis_type", "four_channel"),
+            ("enable_stacked_ensemble", "true"),
+            ("enable_ensemble", "false"),
+            ("enable_radiomics", "false"),
+            ("enable_explainability", "false"),
+        ]
+    )
+    for index, gain in enumerate([1.0, 1.15, 0.85, 1.3]):
+        array = np.clip(rng.normal(0.35, 0.08, size=(size, size)) + lesion * 0.6 * gain, 0, 1)
+        buffer = io.BytesIO()
+        Image.fromarray((array * 255).astype(np.uint8)).save(buffer, format="PNG")
+        form.add("files", (io.BytesIO(buffer.getvalue()), f"legacy_{index}.png"))
+
+    created = client.post("/api/analysis", data=form, content_type="multipart/form-data")
+    assert created.status_code == 201, created.get_json()
+    stacked = created.get_json()["stacked_ensemble"]
+    assert stacked["available"] is True, stacked.get("reasons")
+    assert stacked["meta_feature_count"] == 10
+    assert stacked["prediction"] in (0, 1)
+    reading = stacked["artifacts_read"]["meta_learner.pkl"]
+    assert reading["loader"] == "joblib with compatibility aliases"
+    assert reading["resolved_from_other_modules"] == [
+        {
+            "requested": "sklearn.ensemble._gb_losses.BinomialDeviance",
+            "resolved": "sklearn._loss.loss.HalfBinomialLoss",
+            "renamed_class": True,
+        }
+    ]
+    assert reading["loss_rebuilt"]["restored_attributes"] == ["K"]
+    assert reading["loss_rebuilt"]["installed_class"] == "HalfBinomialLoss"

@@ -86,7 +86,7 @@ origin.
 ### 2.3 Tests
 
 ```bash
-python -m pytest tests -q              # 240 tests, ~2.5 min on 2 CPU cores
+python -m pytest tests -q              # 251 tests, ~2.5 min on 2 CPU cores
                                        # (10 skip without TensorFlow; they cover its serving path)
 python -m pytest tests -q -k api       # only the HTTP-level tests
 cd frontend && npm run typecheck       # TypeScript
@@ -177,6 +177,20 @@ curl -s localhost:5000/api/ensemble/stacked | python -m json.tool | head -40
 `state: ready` means all eight load and the contracts agree. `state: artifacts_missing`,
 `members_missing` or `incompatible` names the file or the mismatch, and the analysis still runs —
 the stacked section simply reports why it could not.
+
+The `.pkl` files were written in the author's environment, and a pickle records the *module path*
+it was written with rather than the class. If scikit-learn or NumPy has since renamed one of those
+modules, the file still loads here: the loader resolves the documented renames
+(`sklearn.ensemble._gb_losses` → `sklearn._loss.loss`, `numpy.core` → `numpy._core`, the
+gradient-boosting loss class names of earlier releases) against the installed library and reports
+every substitution in `contracts.artifacts_read`, so `ModuleNotFoundError: No module named '_loss'`
+on `meta_learner.pkl` is not a reason to re-export or retrain anything. A file whose *loss object*
+was shaped by an older release (scikit-learn 1.3's `BinomialDeviance` carries one attribute where
+this release's class sets nine) is completed with scikit-learn's own construction of the declared
+loss, and the fields that were dropped are reported as `loss_rebuilt`. A loss class is only
+substituted when the meta-learner's own declared `loss` agrees with the substitute — otherwise the
+status is `incompatible` and says why. A module that exists nowhere is refused with its name in
+`error.details.missing_module`; no artefact is ever rewritten.
 
 `unet_best.pth` also needs **MONAI** in the API environment (`pip install monai`); the notebook
 built that member with `monai.nets.UNet`. Without MONAI the member is reported as

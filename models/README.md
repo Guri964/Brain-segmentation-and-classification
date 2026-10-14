@@ -111,6 +111,16 @@ and lists exactly which of the eight are absent. `unet_best.pth` needs **MONAI**
 (`pip install monai`) because the notebook built that member with `monai.nets.UNet`; without MONAI
 the model is reported as `dependency_missing`, never as broken.
 
+The `.pkl` files were written in the author's environment, so they record the module paths of that
+environment. The loader resolves the documented scikit-learn/NumPy renames when it reads them
+(`sklearn.ensemble._gb_losses` → `sklearn._loss.loss`, `numpy.core` → `numpy._core`, the older loss
+class names) and reports every substitution in `contracts.artifacts_read`, so
+`ModuleNotFoundError: No module named '_loss'` is not a reason to re-export the artefact - and a
+loss class is only substituted when the meta-learner's declared `loss` agrees with the substitute.
+A file whose loss object an older release shaped differently is completed with scikit-learn's own
+construction of the declared loss (`loss_rebuilt` in the same payload reports what was dropped).
+See `docs/LIMITATIONS.md` §22.
+
 The three members are *not* interchangeable with `segnet_model.pth` or `UNet-[...].pt`: those two
 were trained at 256×256/512×512 with a single global z-score, the members at 240×240 with a
 per-channel z-score. The compatibility endpoint therefore never groups them together.
