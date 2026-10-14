@@ -154,7 +154,7 @@ export default function EvaluationPage() {
           tooltip="Mean of the per-model Dice coefficients on the reserved test split. Reported only when the artefact exists."
         />
         <MetricCard
-          label="Classification evaluation"
+          label="Classification evaluation (radiomics grade model)"
           value={String(data.classification.state ?? "not_evaluated").replace(
             /_/g,
             " ",
@@ -196,7 +196,7 @@ export default function EvaluationPage() {
           <Tabs
             tabs={[
               { id: "segmentation", label: "Segmentation" },
-              { id: "classification", label: "Classification" },
+              { id: "classification", label: "Classification (radiomics)" },
               { id: "ablations", label: "Ablations" },
               { id: "runtime", label: "Runtime & resources" },
               { id: "protocol", label: "Method" },
@@ -286,7 +286,12 @@ export default function EvaluationPage() {
                 ) : (
                   <InfoNote tone="warn">
                     <p className="font-medium">
-                      Classification has not been evaluated.
+                      The radiomics grade classifier has not been evaluated.
+                    </p>
+                    <p className="mt-1">
+                      The Xception image classifier is a separate model; the accuracy its
+                      metadata records is reported with it on the Tumour Classification page and is
+                      not re-measured here.
                     </p>
                     <p className="mt-1">
                       {String(

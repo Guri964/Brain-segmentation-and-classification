@@ -181,14 +181,26 @@ export default function OverviewPage() {
                 }
                 ok={Boolean(capabilities)}
               />
+              {/* Two rows, because these are two independent classifiers: an absent radiomics
+                  artefact says nothing about the Xception image classifier, which is ready when
+                  its own checkpoint and metadata are present. */}
               <AvailabilityRow
-                label="Classification"
+                label="Grade classifier (radiomics)"
                 value={
                   capabilities?.classification.available
                     ? "validated artefact present"
-                    : "disabled — no validated artefact"
+                    : "disabled — no validated artefact in data/models/classification"
                 }
                 ok={Boolean(capabilities?.classification.available)}
+              />
+              <AvailabilityRow
+                label="Image classifier (Xception)"
+                value={
+                  capabilities?.image_classification.available
+                    ? `ready — ${capabilities.image_classification.classes?.length ?? 0} classes`
+                    : `unavailable — ${(capabilities?.image_classification.state ?? "unknown").replace(/_/g, " ")}`
+                }
+                ok={Boolean(capabilities?.image_classification.available)}
               />
               <AvailabilityRow
                 label="Grad-CAM"

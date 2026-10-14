@@ -505,12 +505,12 @@ export default function NewAnalysisPage() {
                     }
                   />
                   <PlanLine
-                    label="Classification"
+                    label="Classification (radiomics grade model)"
                     ok={plan.classification.available}
                     detail={
                       plan.classification.available
                         ? (plan.classification.model_id ?? "")
-                        : "disabled — no validated artefact"
+                        : "disabled — no validated radiomics artefact"
                     }
                   />
                   <PlanLine

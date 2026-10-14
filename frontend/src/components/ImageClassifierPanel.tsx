@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Loader2, Play, Upload } from "lucide-react";
 import {
   Card,
   CardBody,
   CardHeader,
+  DataTable,
   EmptyState,
   ErrorState,
   InfoNote,
@@ -16,7 +17,7 @@ import { FeatureBarChart } from "./charts";
 import { api, ApiError } from "../services/api";
 import { formatBytes, formatNumber, NOT_AVAILABLE } from "../services/format";
 import { useCapabilities } from "../hooks/useAnalysis";
-import type { ImageClassificationPrediction } from "../types/api";
+import type { ImageClassificationPrediction, ImageClassifierModel } from "../types/api";
 
 const STATE_LABEL: Record<string, string> = {
   ready: "Installed and loadable",
@@ -30,11 +31,16 @@ const STATE_LABEL: Record<string, string> = {
 /**
  * The four-class tumour-type model (`firstnb.ipynb`, Xception).
  *
- * This is a different task from the BraTS HGG/LGG grade classifier on the rest of this page:
- * different dataset, different label space, different input (the image itself, 299x299x3).
- * The panel therefore shows only what the checkpoint and its metadata can support: when either
- * file is missing it says so instead of offering a button that cannot produce a number, and the
- * metrics it displays are labelled as reported by the training notebook, not as verified here.
+ * This is a different task from the BraTS HGG/LGG grade classifier elsewhere on this page:
+ * different dataset, different label space, different input (the image itself, 299x299x3). Its
+ * availability therefore comes from `capabilities.image_classification` — the radiomics grade
+ * classifier's `available` flag says nothing about this model and is never read here.
+ *
+ * The panel shows only what the checkpoint and its metadata can support: when either file is
+ * missing it says which one and where it looked, instead of offering a button that cannot produce
+ * a number. Because the two tasks are separate, this panel stays usable while the grade classifier
+ * is switched off, and the metrics it displays are labelled as reported by the training notebook
+ * (metadata.json), never as measured by this deployment.
  */
 export default function ImageClassifierPanel() {
   const { capabilities, reload } = useCapabilities();
@@ -42,10 +48,31 @@ export default function ImageClassifierPanel() {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<ImageClassificationPrediction | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
+  const [models, setModels] = useState<ImageClassifierModel[] | null>(null);
+  const [catalogueError, setCatalogueError] = useState<string | null>(null);
 
   const summary = capabilities?.image_classification;
 
   const accepted = ".png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp";
+
+  // The catalogue is what names the *files*: capabilities carries one compact summary, while
+  // /api/classification/image/models reports per-file presence (checkpoint, metadata, framework)
+  // and every directory that was searched.
+  const loadCatalogue = useCallback(() => {
+    api
+      .imageClassifierModels()
+      .then((payload) => {
+        setModels(payload.models);
+        setCatalogueError(null);
+      })
+      .catch((caught) =>
+        setCatalogueError(caught instanceof Error ? caught.message : String(caught)),
+      );
+  }, []);
+
+  useEffect(() => {
+    loadCatalogue();
+  }, [loadCatalogue]);
 
   const run = async () => {
     if (!file) return;
@@ -68,9 +95,15 @@ export default function ImageClassifierPanel() {
     }
   };
 
+  const checkAgain = () => {
+    reload();
+    loadCatalogue();
+  };
+
   if (!capabilities) return <LoadingBlock label="Checking the image classifier" />;
 
   const available = Boolean(summary?.available);
+  const model = models?.[0] ?? null;
   const chartData = (result?.scores ?? []).map((entry) => ({
     label: entry.label,
     value: entry.probability,
@@ -79,39 +112,95 @@ export default function ImageClassifierPanel() {
   return (
     <Card>
       <CardHeader
-        title="Tumour type from the image (four classes)"
-        subtitle="Keras Xception trained in firstnb.ipynb. Separate task, dataset and label space from the grade model above."
+        title="Xception image classification (four tumour types)"
+        subtitle="The image itself is the input: 299 × 299 × 3 RGB, Keras Xception trained in firstnb.ipynb. A separate task, dataset and label space from the radiomics grade classifier, and its status is read from image_classification — never from the radiomics classifier."
+        actions={
+          <Pill tone={available ? "teal" : "amber"}>
+            {available ? "ready" : (summary?.state ?? "unknown")}
+          </Pill>
+        }
       />
       <CardBody className="space-y-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <Pill tone={available ? "teal" : "amber"}>
-            {STATE_LABEL[summary?.state ?? ""] ?? summary?.state ?? "unknown"}
-          </Pill>
-          <span className="text-xs text-clinical-500 dark:text-clinical-400">
-            {summary?.display_name ?? NOT_AVAILABLE}
-          </span>
-        </div>
+        <section className="grid gap-3 sm:grid-cols-3">
+          <MetricCard
+            label="Backend status"
+            value={STATE_LABEL[summary?.state ?? ""] ?? summary?.state ?? NOT_AVAILABLE}
+            tone={available ? "good" : "warn"}
+            hint="From GET /api/capabilities → image_classification"
+          />
+          <MetricCard
+            label="Model"
+            value={summary?.display_name ?? NOT_AVAILABLE}
+            hint="brain_tumor_xception"
+          />
+          <MetricCard
+            label="Input"
+            value={summary?.input_size?.join(" × ") ?? NOT_AVAILABLE}
+            hint="RGB, as recorded in metadata.json"
+          />
+        </section>
+
+        {available ? (
+          <InfoNote tone="neutral">
+            <p className="font-semibold">This classifier is ready.</p>
+            <p className="mt-1">
+              Classes: {summary?.classes?.length ? summary.classes.join(", ") : NOT_AVAILABLE}. The
+              predicted label is the tumour-type class of the training dataset
+              {summary?.model_path ? (
+                <>
+                  {" "}
+                  (<code>{summary.model_path}</code>)
+                </>
+              ) : null}
+              . It is not the BraTS HGG/LGG grade, not a malignancy verdict and not a stage.
+            </p>
+          </InfoNote>
+        ) : (
+          <InfoNote tone="warn">
+            <p className="font-semibold">The image classifier is not usable in this deployment</p>
+            <p className="mt-1">{summary?.reason}</p>
+            {model ? (
+              <ul className="mt-2 list-disc space-y-1 pl-4">
+                <li>
+                  <code>{model.model_file}</code> —{" "}
+                  {model.model_file_present ? "present" : "not found"}
+                  {model.model_path ? ` (looked at ${model.model_path})` : ""}
+                </li>
+                <li>
+                  <code>{model.metadata_file}</code> —{" "}
+                  {model.metadata_present ? "present" : "not found"}
+                </li>
+                <li>
+                  TensorFlow —{" "}
+                  {model.framework_available === null
+                    ? "not checked (a file is missing first)"
+                    : model.framework_available
+                      ? `importable${model.framework_version ? ` (${model.framework_version})` : ""}`
+                      : `not importable${model.framework_error ? ` (${model.framework_error})` : ""}`}
+                </li>
+              </ul>
+            ) : null}
+            {model?.searched?.length ? (
+              <p className="mt-2 text-xs opacity-80">
+                Directories searched: {model.searched.join(" · ")}
+              </p>
+            ) : null}
+            <p className="mt-2">
+              Weights are never downloaded automatically and nothing is predicted until both files
+              are in place.
+            </p>
+          </InfoNote>
+        )}
+
+        {catalogueError ? (
+          <InfoNote tone="neutral">
+            The per-file catalogue could not be read ({catalogueError}); the status above comes from
+            /api/capabilities.
+          </InfoNote>
+        ) : null}
 
         {available ? (
           <>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <MetricCard
-                label="Input"
-                value={summary?.input_size?.join(" × ") ?? NOT_AVAILABLE}
-                hint="RGB, as recorded in metadata.json"
-              />
-              <MetricCard
-                label="Classes"
-                value={summary?.classes?.length ?? NOT_AVAILABLE}
-                hint={summary?.classes?.join(", ") ?? ""}
-              />
-              <MetricCard
-                label="Preprocessing"
-                value="Xception"
-                hint="x / 127.5 - 1, identical to keras.applications.xception.preprocess_input"
-              />
-            </div>
-
             <div className="rounded-lg border border-dashed border-clinical-300 p-3 dark:border-clinical-700">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -197,6 +286,15 @@ export default function ImageClassifierPanel() {
                   />
                 </div>
 
+                <DataTable
+                  columns={["Class", "Probability"]}
+                  rows={(result.scores ?? []).map((entry) => [
+                    entry.label,
+                    formatNumber(entry.probability, 6),
+                  ])}
+                  empty="The model returned no class probabilities."
+                />
+
                 <div>
                   <p className="mb-2 text-xs font-medium uppercase tracking-wide text-clinical-500 dark:text-clinical-400">
                     Class probabilities from the model
@@ -250,26 +348,23 @@ export default function ImageClassifierPanel() {
           </>
         ) : (
           <EmptyState
-            title="The image classifier is not installed"
+            title="Upload is disabled until the two files are in place"
             message={
               <span className="space-y-2">
-                <span className="block">{summary?.reason}</span>
                 <span className="block">
-                  Expected files: <code>brain_tumor_xception_final.keras</code> and{" "}
-                  <code>metadata.json</code> in the weights directory
-                  {summary?.model_path ? (
-                    <>
-                      {" "}
-                      (<code>{summary.model_path.replace(/\/[^/]+$/, "")}</code>)
-                    </>
-                  ) : null}
-                  , or point <code>BRAIN_WEIGHTS_DIR</code> at another directory. Weights are
-                  never downloaded automatically and nothing is predicted until they are there.
+                  This panel is the Xception image classifier only. The radiomics grade classifier
+                  above has its own status and does not affect this one.
                 </span>
+                {summary?.model_path ? (
+                  <span className="block">
+                    Expected in <code>{summary.model_path.replace(/\/[^/]+$/, "")}</code>, or point{" "}
+                    <code>BRAIN_WEIGHTS_DIR</code> at another directory.
+                  </span>
+                ) : null}
               </span>
             }
             action={
-              <button type="button" className="btn-secondary" onClick={reload}>
+              <button type="button" className="btn-secondary" onClick={checkAgain}>
                 Check again
               </button>
             }

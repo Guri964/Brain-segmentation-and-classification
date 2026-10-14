@@ -151,9 +151,18 @@ export default function AppLayout() {
                 {capabilities.models.length}
               </p>
               <p>Radiomics: {capabilities.radiomics.selected_backend}</p>
+              {/* Two classifiers, two lines: the radiomics grade classifier and the Xception image
+                  classifier are separate tasks that are enabled independently, so one line saying
+                  "classification: disabled" would misdescribe both. */}
               <p>
-                Classification:{" "}
+                Grade classifier (radiomics):{" "}
                 {capabilities.classification.available ? "enabled" : "disabled"}
+              </p>
+              <p>
+                Image classifier (Xception):{" "}
+                {capabilities.image_classification.available
+                  ? "ready"
+                  : (capabilities.image_classification.state ?? "unavailable").replace(/_/g, " ")}
               </p>
             </div>
           ) : null}

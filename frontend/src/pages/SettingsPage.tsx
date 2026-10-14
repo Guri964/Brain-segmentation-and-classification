@@ -347,8 +347,11 @@ export default function SettingsPage() {
                         </Pill>,
                         capabilities.radiomics.note,
                       ],
+                      // Two independent classifiers: the radiomics grade classifier and the
+                      // Xception image classifier each get their own row and their own reason, so
+                      // neither status is presented as the status of both.
                       [
-                        "Classification",
+                        "Classification — radiomics grade model",
                         <Pill
                           tone={
                             capabilities.classification.available
@@ -363,6 +366,27 @@ export default function SettingsPage() {
                         </Pill>,
                         capabilities.classification.reason ??
                           "A validated artefact with a recorded label mapping is present.",
+                      ],
+                      [
+                        "Classification — Xception image model",
+                        <Pill
+                          tone={
+                            capabilities.image_classification.available
+                              ? "teal"
+                              : "amber"
+                          }
+                          key={"d2"}
+                        >
+                          {capabilities.image_classification.available
+                            ? "ready"
+                            : (capabilities.image_classification.state ?? "unknown").replace(
+                                /_/g,
+                                " ",
+                              )}
+                        </Pill>,
+                        capabilities.image_classification.available
+                          ? `${capabilities.image_classification.classes?.length ?? 0} classes read from metadata.json; predictions are never combined with the grade model.`
+                          : capabilities.image_classification.reason,
                       ],
                       [
                         "Grad-CAM",
@@ -417,7 +441,10 @@ export default function SettingsPage() {
                   />
                   {capabilities.classification.requirements?.length ? (
                     <InfoNote tone="warn">
-                      <p className="font-medium">Classification requirements</p>
+                      <p className="font-medium">
+                        Radiomics grade classifier requirements (the Xception image classifier is
+                        separate and unaffected)
+                      </p>
                       <ul className="mt-1 list-disc space-y-1 pl-4">
                         {capabilities.classification.requirements.map(
                           (requirement) => (

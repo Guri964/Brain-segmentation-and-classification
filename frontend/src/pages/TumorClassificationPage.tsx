@@ -59,6 +59,16 @@ export default function TumorClassificationPage() {
   const metrics = status?.metrics ?? {};
   const available = Boolean(classification?.available);
 
+  // Two separate classifiers share this page.  The radiomics grade classifier is the one whose
+  // artefact lives in data/models/classification; the Xception image classifier is a different
+  // task with its own files, and its state is read from image_classification.  Neither flag is
+  // ever used to describe the other, and neither is reported as available when it is not.
+  const radiomicsEnabled = Boolean(
+    card?.status.available ?? capabilities?.classification.available,
+  );
+  const imageSummary = capabilities?.image_classification;
+  const imageReady = Boolean(imageSummary?.available);
+
   const probabilityRows = useMemo(() => {
     if (!classification?.scores?.length) return [];
     return classification.scores.map((score, index) => ({
@@ -101,17 +111,31 @@ export default function TumorClassificationPage() {
             Tumour classification
           </h2>
           <p className="mt-1 max-w-3xl text-sm text-clinical-600 dark:text-clinical-300">
-            A class label predicted from the radiomics features of the region the
-            segmentation found. The label is the dataset's own annotation — for
-            the BraTS grade column that is the WHO grade group (HGG or LGG). It
-            is not a malignancy verdict, not a clinical stage and not a
-            prognosis, and the class never comes from the mask itself.
+            Two independent classifiers are reported on this page, and each one's status is its
+            own. <strong>Radiomics grade classification</strong> predicts a class from the radiomics
+            features of the region the segmentation found — for the BraTS grade column that is the
+            WHO grade group (HGG or LGG). <strong>Xception image classification</strong> predicts a
+            tumour type from the image itself (299 × 299 × 3 RGB, four classes). Neither is a
+            malignancy verdict, a clinical stage or a prognosis, and neither label is ever taken
+            from the mask.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge
-            value={available ? "completed" : "not_loaded"}
-            label={available ? "prediction available" : "classification disabled"}
+            value={radiomicsEnabled ? "ready" : "not_loaded"}
+            label={
+              radiomicsEnabled
+                ? "Radiomics grade classifier: artefact loaded"
+                : "Radiomics grade classifier: not available"
+            }
+          />
+          <StatusBadge
+            value={imageReady ? "ready" : "not_loaded"}
+            label={
+              imageReady
+                ? "Xception image classifier: ready"
+                : "Xception image classifier: not installed"
+            }
           />
           <Link to="/analysis/new" className="btn-secondary">
             <Upload className="h-4 w-4" />
@@ -120,15 +144,52 @@ export default function TumorClassificationPage() {
         </div>
       </header>
 
+      <Card>
+        <CardHeader
+          title="Which classifier is which"
+          subtitle="The two pipelines are trained on different data, consume different inputs and are enabled independently"
+        />
+        <CardBody className="space-y-3">
+          <DataTable
+            columns={["Pipeline", "Input", "Output", "Backend status"]}
+            rows={[
+              [
+                "Radiomics grade classification",
+                `Radiomics features of the segmented region${status?.feature_count ? ` (${formatInt(status.feature_count)} features)` : ""}`,
+                Object.values(status?.label_mapping ?? {}).join(", ") || "the dataset's grade column",
+                <Pill key="grade" tone={radiomicsEnabled ? "teal" : "amber"}>
+                  {radiomicsEnabled ? "artefact loaded" : "not available"}
+                </Pill>,
+              ],
+              [
+                "Xception image classification",
+                imageSummary?.input_size?.join(" × ") ?? "299 × 299 × 3 RGB",
+                imageSummary?.classes?.length
+                  ? imageSummary.classes.join(", ")
+                  : "Glioma, Meningioma, Pituitary, No Tumor",
+                <Pill key="image" tone={imageReady ? "teal" : "amber"}>
+                  {imageReady ? "ready" : (imageSummary?.state ?? "unknown")}
+                </Pill>,
+              ],
+            ]}
+          />
+          <InfoNote tone="neutral">
+            A radiomics classifier being switched off does not disable the image classifier, and
+            the image classifier's status says nothing about the radiomics one. The sections below
+            report each pipeline on its own.
+          </InfoNote>
+        </CardBody>
+      </Card>
+
       {error ? <ErrorState message={error} title="Could not read the model card" /> : null}
 
       <Card>
         <CardHeader
-          title="Model card"
-          subtitle="What the served classifier is, what it was scored on, and what it must not be used for"
+          title="Radiomics grade classifier — model card"
+          subtitle="Pipeline 1 of 2. What the served radiomics classifier is, what it was scored on, and what it must not be used for. Its status is independent of the Xception image classifier."
           actions={
             <Pill tone={status?.available ? "teal" : "amber"}>
-              {status?.available ? "artefact loaded" : "no artefact"}
+              {status?.available ? "artefact loaded" : "no radiomics artefact"}
             </Pill>
           }
         />
@@ -184,7 +245,13 @@ export default function TumorClassificationPage() {
               ) : null}
               {!status?.available ? (
                 <InfoNote tone="warn">
-                  <p className="font-semibold">Classification is switched off</p>
+                  <p className="font-semibold">
+                    Radiomics grade classification is switched off
+                  </p>
+                  <p className="mt-1">
+                    This is the radiomics classifier only — the Xception image classifier below is
+                    unaffected and reports its own status.
+                  </p>
                   <p className="mt-1">{status?.reason}</p>
                   {card.training.requirements?.length ? (
                     <ul className="mt-2 list-disc space-y-1 pl-4">
@@ -598,10 +665,22 @@ export default function TumorClassificationPage() {
           </InfoNote>
           <p className="text-xs text-clinical-500 dark:text-clinical-400">
             {available
-              ? "Predictions on this page come from the served artefact and carry its recorded metrics."
-              : "No prediction is shown while classification is disabled; nothing is filled in for display."}
+              ? "Predictions from the radiomics classifier come from the served artefact and carry its recorded metrics."
+              : "No radiomics prediction is shown while its artefact is absent; nothing is filled in for display. The Xception image classifier above runs or not on its own status."}
           </p>
         </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Xception image classifier — pipeline 2 of 2"
+          subtitle="Enabled independently of the radiomics classifier above: different dataset, different label space, different input (the image itself)."
+          actions={
+            <Pill tone={imageReady ? "teal" : "amber"}>
+              {imageReady ? "ready" : (imageSummary?.state ?? "unknown")}
+            </Pill>
+          }
+        />
       </Card>
 
       <ImageClassifierPanel />

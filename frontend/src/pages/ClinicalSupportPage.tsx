@@ -434,7 +434,9 @@ export default function ClinicalSupportPage() {
                     : "No labelled test set has been evaluated, so no accuracy claim can be made for this deployment.",
                 ],
                 [
-                  "Classification output",
+                  // the analysis record carries the radiomics classifier's output only; the
+                  // Xception image classifier is never part of one of these records
+                  "Classification output (radiomics grade model)",
                   <StatusBadge
                     value={
                       result?.classification.available

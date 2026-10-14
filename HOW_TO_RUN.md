@@ -207,6 +207,22 @@ endpoint answers 409 with the missing file and nothing else on the platform is a
 
 ---
 
+### The two classifiers are reported separately
+
+`GET /api/capabilities` carries two independent statuses, and the classification page, the sidebar,
+the overview dashboard and the settings feature-flags table read each one on its own:
+
+| Field | What it describes | Where its artefact lives |
+|---|---|---|
+| `classification` | the **radiomics grade classifier** — a class predicted from the radiomics features of the segmented region | `data/models/classification/` (trained by `scripts/train_classifier.py`) |
+| `image_classification` | the **Xception image classifier** — the four tumour-type classes read from the image itself (299×299×3 RGB) | `brain_tumor_xception_final.keras` + `metadata.json` in the weights directory |
+
+A missing radiomics artefact therefore never switches the image classifier off, and the image
+classifier's state says nothing about the radiomics one. The classification page labels the
+radiomics model card "pipeline 1 of 2" and the image panel "pipeline 2 of 2", and each badge names
+the model it describes. Nothing is marked available to make a page look complete: a status is only
+green when the artefact it names is loadable.
+
 ## 4. First run checklist
 
 1. `python scripts/check_models.py` — confirms which checkpoints actually work. Expect
