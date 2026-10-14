@@ -18,6 +18,7 @@ import {
   ValueOrUnavailable,
 } from "../components/ui";
 import { ChannelStrip, ImageGrid } from "../components/ImageViewer";
+import EnsemblePanel from "../components/EnsemblePanel";
 import { useAnalysis } from "../hooks/useAnalysis";
 import { api } from "../services/api";
 import {
@@ -497,6 +498,7 @@ export default function SegmentationPage() {
           </Card>
         </div>
       </div>
+      <EnsemblePanel payload={result.stacked_ensemble ?? null} />
     </div>
   );
 }

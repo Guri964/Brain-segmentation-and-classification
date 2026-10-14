@@ -21,6 +21,8 @@ import type {
   RadiomicsCatalogue,
   RadiomicsFeatureSet,
   ReportListResponse,
+  StackedEnsembleStatus,
+  StackedEnsembleSummary,
   Statistics,
   SystemInfo,
 } from "../types/api";
@@ -199,6 +201,11 @@ export const api = {
       }>;
     }>(`/api/assistant/history/${analysisId}`),
 
+  stackedEnsemble: () => request<StackedEnsembleStatus>("/api/ensemble/stacked"),
+  stackedEnsembleStatus: (): Promise<StackedEnsembleSummary | null> =>
+    request<Capabilities>("/api/capabilities").then(
+      (capabilities) => capabilities.stacked_ensemble,
+    ),
   classificationStatus: (): Promise<ClassificationStatus> =>
     request<Capabilities>("/api/capabilities").then(
       (capabilities) => capabilities.classification,

@@ -4,6 +4,9 @@ export interface InputSpec {
   width: number;
   normalisation: string;
   dtype: string;
+  // "global" = one z-score over the whole (H, W, C) block; "per_channel" = one z-score per
+  // channel, which is what the notebook ensemble's members were trained on.
+  normalisation_kind?: "global" | "per_channel";
 }
 
 export interface FlaggedError {
@@ -245,6 +248,9 @@ export interface Capabilities {
   };
   classification: ClassificationStatus;
   image_classification: ImageClassificationSummary;
+  // Compact view of the notebook's stacked ensemble; the full artefact table, member contracts
+  // and digests live on GET /api/ensemble/stacked.
+  stacked_ensemble: StackedEnsembleSummary | null;
   assistant: AssistantStatus;
   explainability: {
     segmentation: Array<{
@@ -510,6 +516,8 @@ export interface AnalysisPayload {
   explainability: ExplainabilityEntry[];
   classification: ClassificationResult;
   model_comparison: ModelComparison;
+  // Null unless enable_stacked_ensemble was set on a four-channel run.
+  stacked_ensemble?: StackedEnsembleResult | null;
   artifacts_root: string;
   report?: {
     available: boolean;
@@ -628,6 +636,7 @@ export interface PlanResponse {
     targets: Array<{ model_id: string; target_layer: string | null }>;
   };
   classification: ClassificationStatus;
+  stacked_ensemble: StackedEnsemblePlan;
 }
 
 export interface AnalysisOptions {
@@ -930,4 +939,162 @@ export interface ImageClassificationPrediction {
   label_semantics: string;
   disclaimer: string;
   upload?: { filename: string | null; bytes: number; decoded_shape: number[] };
+}
+
+export interface StackedEnsembleSummary {
+  available: boolean;
+  state: string;
+  reason: string;
+  members: Array<{ model_id: string; status: string }>;
+  missing_artifacts: string[];
+  target_semantics: string;
+  reported_metrics: Record<string, number>;
+  metrics_provenance: string;
+}
+
+export interface StackedEnsembleArtifact {
+  key: string;
+  role: string;
+  file: string;
+  path: string;
+  present: boolean;
+  size_bytes: number | null;
+}
+
+export interface StackedEnsembleMemberStatus {
+  model_id: string;
+  display_name: string;
+  status: string;
+  available: boolean;
+  message: string;
+  path: string;
+  architecture: string;
+  parameter_count: number | null;
+}
+
+export interface StackedEnsembleStatus {
+  available: boolean;
+  state: string;
+  reason: string;
+  task: string;
+  task_description: string;
+  members: StackedEnsembleMemberStatus[];
+  artifacts: StackedEnsembleArtifact[];
+  contracts: {
+    radiomics_features?: number;
+    meta_features?: number;
+    meta_classes?: string[];
+    artifact_digests?: Record<string, string>;
+    [key: string]: unknown;
+  };
+  input_requirements: {
+    analysis_type: string;
+    channels: number;
+    spatial_size: number[];
+    normalisation: string;
+    modality_order: string[];
+  } | null;
+  meta_features: string[];
+  target_semantics: string;
+  leakage_note: string;
+  reported_metrics: Record<string, number>;
+  metrics_provenance: string;
+  dice_slot_note: string;
+  feature_mask_note: string;
+  distinct_from_grade_and_type_models: string;
+  install_note: string;
+  checked_at: string | null;
+  disclaimer: string;
+}
+
+export interface StackedEnsembleMemberStatistics {
+  model_id: string;
+  dice_vs_consensus: number;
+  max_probability: number;
+  mean_probability: number;
+  foreground_fraction: number;
+  inference_seconds: number | null;
+  reused_from_analysis: boolean;
+}
+
+export interface StackedEnsemblePayload {
+  available: true;
+  model_id: string;
+  display_name: string;
+  task: string;
+  state: string;
+  // Index into the notebook's own class order, whose names are the mask-size proxy labels below.
+  prediction: number;
+  class_labels: string[];
+  class_probabilities: number[] | null;
+  meta_features: Record<string, number>;
+  meta_features_scaled: number[];
+  meta_feature_count: number;
+  radiomics: {
+    feature_count: number;
+    feature_names_from: string;
+    raw_feature_digest: string;
+    scaled_feature_digest: string;
+    logits: number[];
+    probabilities: number[];
+    score: number;
+    prediction: number;
+    scaler: string;
+    cnn: string;
+  };
+  members: Array<{
+    model_id: string;
+    display_name: string;
+    reused: boolean;
+    threshold: number;
+    foreground_fraction: number;
+    max_probability: number;
+    mean_probability: number;
+    inference_seconds: number | null;
+    dice_vs_consensus: number;
+  }>;
+  member_statistics: StackedEnsembleMemberStatistics[];
+  consensus: {
+    threshold: number;
+    foreground_pixels: number;
+    foreground_fraction: number;
+    probability_mean: number;
+    probability_max: number;
+  };
+  dice_reference: string;
+  dice_note: string;
+  feature_mask_source: string;
+  target_semantics: string;
+  leakage_note: string;
+  reported_metrics: Record<string, number>;
+  metrics_provenance: string;
+  artifact_digests: Record<string, string>;
+  artifact_sizes: Record<string, number>;
+  meta_classes: string[];
+  inference_seconds: number;
+  label_semantics: string;
+  disclaimer: string;
+}
+
+// When the stacked ensemble was requested but could not run, the analysis payload carries this
+// shape instead of a prediction. It is a reported state, not an error.
+export interface StackedEnsembleUnavailable {
+  available: false;
+  state: string;
+  reasons: string[];
+  details?: Record<string, unknown>;
+  members_required?: string[];
+  model_status?: Record<string, string>;
+}
+
+export type StackedEnsembleResult = StackedEnsemblePayload | StackedEnsembleUnavailable;
+
+export interface StackedEnsemblePlan {
+  requested: boolean;
+  runnable: boolean;
+  state: string;
+  reason: string;
+  members: Array<{ model_id: string; available: boolean; status: string }>;
+  input_requirements: StackedEnsembleStatus["input_requirements"];
+  target_semantics: string;
 }

@@ -40,6 +40,7 @@ export default function NewAnalysisPage() {
   const [enableRadiomics, setEnableRadiomics] = useState(true);
   const [enableExplainability, setEnableExplainability] = useState(true);
   const [enableUncertainty, setEnableUncertainty] = useState(false);
+  const [enableStackedEnsemble, setEnableStackedEnsemble] = useState(false);
   const [radiomicsMask, setRadiomicsMask] = useState("best");
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
@@ -49,6 +50,11 @@ export default function NewAnalysisPage() {
   const [stage, setStage] = useState("");
   const [error, setError] = useState<ApiError | null>(null);
   const abortRef = useRef(false);
+  // Whether the notebook's stacked ensemble has every artefact it needs. The toggle stays
+  // disabled until it does, so the run options never promise a result the backend cannot produce.
+  const stackedReady = Boolean(capabilities?.stacked_ensemble?.available);
+  const stackedMissing =
+    capabilities?.stacked_ensemble?.missing_artifacts ?? [];
   const channelModels = useMemo(
     () =>
       capabilities?.models.filter(
@@ -76,6 +82,7 @@ export default function NewAnalysisPage() {
         enable_explainability: enableExplainability,
         ensemble_strategy: ensembleStrategy,
         radiomics_mask: radiomicsMask,
+        enable_stacked_ensemble: enableStackedEnsemble,
       })
       .then((payload) => {
         if (!cancelled) setPlan(payload);
@@ -98,6 +105,7 @@ export default function NewAnalysisPage() {
     enableExplainability,
     ensembleStrategy,
     radiomicsMask,
+    enableStackedEnsemble,
   ]);
   const filesReady =
     analysisType === "single_channel"
@@ -126,6 +134,7 @@ export default function NewAnalysisPage() {
     form.append("enable_explainability", String(enableExplainability));
     form.append("enable_uncertainty", String(enableUncertainty));
     form.append("radiomics_mask", radiomicsMask);
+    form.append("enable_stacked_ensemble", String(enableStackedEnsemble));
     setRunning(true);
     setError(null);
     setProgress(0);
@@ -296,7 +305,32 @@ export default function NewAnalysisPage() {
                     )
                   }
                 />
+                <Toggle
+                  label="Stacked ensemble (notebook)"
+                  checked={enableStackedEnsemble}
+                  onChange={setEnableStackedEnsemble}
+                  tooltip="FINAL ENSEMBLE NB.ipynb: three four-channel segmentation members + a 46-feature radiomics CNN feed a gradient-boosted head. It needs the four-channel input and predicts a mask-size proxy, not a grade."
+                  disabled={
+                    analysisType !== "four_channel" ||
+                    !stackedReady
+                  }
+                />
               </div>
+              {!stackedReady ? (
+                <InfoNote tone="warn">
+                  <strong>The notebook's stacked ensemble is not installed.</strong>{" "}
+                  {(capabilities?.stacked_ensemble?.reason ?? "").trim()}{" "}
+                  {stackedMissing.length ? (
+                    <>
+                      Missing files:{" "}
+                      <code>{stackedMissing.join(", ")}</code>.{" "}
+                    </>
+                  ) : null}
+                  Copy them into <code>models/weights/</code> (or point{" "}
+                  <code>BRAIN_WEIGHTS_DIR</code> at the folder that holds them) and reload this
+                  page; weights are never downloaded automatically.
+                </InfoNote>
+              ) : null}
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
                   <label className="label" htmlFor="strategy">
@@ -477,6 +511,17 @@ export default function NewAnalysisPage() {
                       plan.classification.available
                         ? (plan.classification.model_id ?? "")
                         : "disabled — no validated artefact"
+                    }
+                  />
+                  <PlanLine
+                    label="Stacked ensemble"
+                    ok={plan.stacked_ensemble.runnable}
+                    detail={
+                      plan.stacked_ensemble.requested
+                        ? plan.stacked_ensemble.runnable
+                          ? "three members + radiomics CNN + meta-learner"
+                          : plan.stacked_ensemble.reason
+                        : "not requested"
                     }
                   />
                 </>
