@@ -15,7 +15,30 @@ from ..utils.images import (
 )
 from ..utils.io import ensure_within, new_analysis_id, safe_filename, utc_now, write_bytes_atomic, write_json
 from ..utils.metrics import agreement_metrics
+from ..services.preprocessing_service import NORMALISATION_GLOBAL, NORMALISATION_PER_CHANNEL
+
 logger = logging.getLogger(__name__)
+
+#: The spatial size and channel count the stacked ensemble's members were trained on
+#: (FINAL ENSEMBLE NB.ipynb: 240x240 four-channel slices, per-channel z-score).
+STACKED_INPUT_SIZE = 240
+STACKED_INPUT_CHANNELS = 4
+#: The three checkpoints whose statistics feed the meta-learner, in the notebook's column order.
+STACKED_MEMBERS = ("segnet_ensemble_240", "unet_ensemble_240", "raunet_ensemble_240")
+
+
+def _stacked_input_spec():
+    """The tensor the ensemble notebook's members were trained on, as an ``InputSpec``."""
+
+    from ..ml.registry import InputSpec
+
+    return InputSpec(
+        channels=4,
+        height=STACKED_INPUT_SIZE,
+        width=STACKED_INPUT_SIZE,
+        normalisation="per-channel z-score ((x - mean) / (std + 1e-6))",
+        normalisation_kind="per_channel",
+    )
 @dataclass
 class AnalysisRequest:
     files: list[tuple[str, bytes]]
@@ -32,6 +55,10 @@ class AnalysisRequest:
     radiomics_mask: str = "best"
     modality_names: list[str] | None = None
     spacing: tuple[float, ...] | None = None
+    #: Run the stacked ensemble of FINAL ENSEMBLE NB.ipynb.  Off by default: it needs eight
+    #: artefacts, three segmentation members and a four-channel 240x240 input, so the caller
+    #: asks for it explicitly instead of paying for it on every analysis.
+    enable_stacked_ensemble: bool = False
 class AnalysisService:
     def __init__(
         self,
@@ -47,6 +74,7 @@ class AnalysisService:
         classification,
         health,
         report=None,
+        stacked_ensemble=None,
     ):
         self.config = config
         self.repository = repository
@@ -60,6 +88,7 @@ class AnalysisService:
         self.classification = classification
         self.health = health
         self.report = report
+        self.stacked_ensemble = stacked_ensemble
     @property
     def upload_dir(self) -> Path:
         return Path(self.config.DATA_DIR) / self.config.UPLOAD_DIR_NAME
@@ -196,7 +225,131 @@ class AnalysisService:
                 ],
             },
             "classification": self.classification.status(),
+            "stacked_ensemble": self._stacked_plan(request),
         }
+    def _stacked_plan(self, request: AnalysisRequest) -> dict:
+        """Whether the notebook's stacked ensemble can run for this request, and why not.
+        Reads the same status the ``GET /api/ensemble/stacked`` endpoint serves, so the plan and
+        the ensemble's own report can never disagree about what is missing.
+        """
+        from ..ml.radiomics_notebook import TARGET_SEMANTICS
+        requested = bool(request.enable_stacked_ensemble)
+        if self.stacked_ensemble is None:
+            return {
+                "requested": requested,
+                "runnable": False,
+                "state": "unavailable",
+                "reason": "The stacked-ensemble service is not wired into this deployment.",
+                "members": [],
+                "input_requirements": None,
+                "target_semantics": TARGET_SEMANTICS,
+            }
+        status = self.stacked_ensemble.status()
+        reason = status["reason"]
+        runnable = bool(status["available"])
+        if runnable and request.analysis_type != "four_channel":
+            runnable = False
+            reason = (
+                "The stacked ensemble consumes the notebook's four-channel 240x240 tensor, so it "
+                "only runs on the four-channel input; choose that analysis type or leave the "
+                "stacked ensemble off."
+            )
+        return {
+            "requested": requested,
+            "runnable": runnable,
+            "state": status["state"],
+            "reason": reason,
+            "members": [
+                {
+                    "model_id": member["model_id"],
+                    "available": member["available"],
+                    "status": member["status"],
+                }
+                for member in status["members"]
+            ],
+            "input_requirements": status["input_requirements"],
+            "target_semantics": TARGET_SEMANTICS,
+        }
+    def _with_stacked_members(self, model_ids: list[str], request: AnalysisRequest) -> list[str]:
+        """Ensure the three notebook members are part of the run when the ensemble is asked for.
+
+        Their outputs are the ensemble's own inputs, so running them once here (and passing the
+        results into the ensemble service) avoids both a second forward pass and an ensemble
+        whose members were never actually executed.
+        """
+
+        if request.analysis_type != "four_channel":
+            raise ValidationError(
+                "The stacked ensemble consumes the notebook's four-channel 240x240 tensor; it "
+                "cannot run on a single-channel upload. Set analysis_type=four_channel (four "
+                "modality images or one four-channel .npz) or disable enable_stacked_ensemble.",
+                details={
+                    "analysis_type": request.analysis_type,
+                    "required_channels": STACKED_INPUT_CHANNELS,
+                    "required_size": [STACKED_INPUT_SIZE, STACKED_INPUT_SIZE],
+                },
+            )
+        ordered = list(model_ids)
+        for model_id in STACKED_MEMBERS:
+            if model_id not in ordered:
+                ordered.append(model_id)
+        return ordered
+
+    def _run_stacked_ensemble(
+        self,
+        request: AnalysisRequest,
+        model_ids: list[str],
+        member_results: dict,
+        preprocessed,
+    ) -> dict:
+        """Run the notebook's meta-learner, or explain precisely why it cannot run."""
+
+        if self.stacked_ensemble is None:
+            return {
+                "available": False,
+                "state": "not_configured",
+                "reasons": ["The stacked-ensemble service is not wired into this deployment."],
+            }
+        reused = {model_id: member_results.get(model_id) for model_id in STACKED_MEMBERS}
+        missing = [mid for mid, result in reused.items() if result is None]
+        if missing:
+            return {
+                "available": False,
+                "state": "members_unavailable",
+                "reasons": [
+                    "The meta-learner consumes one row per segmentation member and was fitted "
+                    "on three; these members did not produce a prediction: " + ", ".join(missing)
+                ],
+                "members_required": list(STACKED_MEMBERS),
+                "model_status": {
+                    mid: self.registry.load_model(mid).status for mid in STACKED_MEMBERS
+                },
+            }
+        consensus = np.stack(
+            [np.asarray(reused[mid].probability, dtype=np.float32) for mid in STACKED_MEMBERS],
+            axis=0,
+        ).mean(axis=0)
+        try:
+            return self.stacked_ensemble.predict(
+                preprocessed.tensor,
+                threshold=request.threshold,
+                member_results={mid: result for mid, result in reused.items() if result},
+                consensus_mask=consensus > request.threshold,
+            )
+        except ModelUnavailableError as exc:
+            # A missing artefact or a broken contract is a *reported* state, not a failed
+            # analysis: the rest of the pipeline keeps its results.
+            logger.info("Stacked ensemble unavailable: %s", exc.message)
+            return {
+                "available": False,
+                "state": exc.details.get("state", "unavailable"),
+                "reasons": [exc.message],
+                "details": exc.details,
+                "model_status": {
+                    mid: self.registry.load_model(mid).status for mid in STACKED_MEMBERS
+                },
+            }
+
     def _default_models(self, analysis_type: str) -> list[str]:
         if analysis_type == "single_channel":
             return ["unet_dynamic_512"]
@@ -226,6 +379,8 @@ class AnalysisService:
                 except Exception:
                     logger.debug("progress callback failed", exc_info=True)
         model_ids = request.model_ids or self._default_models(request.analysis_type)
+        if request.enable_stacked_ensemble:
+            model_ids = self._with_stacked_members(model_ids, request)
         if not model_ids:
             raise ModelUnavailableError(
                 "No segmentation checkpoint is available for this analysis type."
@@ -269,19 +424,45 @@ class AnalysisService:
         descriptors = [self.registry.load_model(model_id).descriptor for model_id in model_ids]
         primary_spec = descriptors[0].input_spec
         payloads = [(entry["filename"], entry["_bytes"]) for entry in stored_uploads]
-        if primary_spec.channels == 1:
-            if len(payloads) != 1:
-                raise ValidationError(
-                    "The single-channel pipeline expects exactly one image; received "
-                    f"{len(payloads)}."
+        prepared: dict[tuple, object] = {}
+
+        def prepared_for(spec):
+            """Preprocess for one input specification, caching by (channels, size, kind).
+
+            Two model families live in this deployment and they do **not** share a tensor: the
+            company checkpoints take one global z-score over the four-channel block, and the
+            ensemble notebook's members take a per-channel z-score.  Building one tensor per
+            specification keeps each model on the numbers it was trained on instead of quietly
+            handing both the same array.
+            """
+
+            key = (spec.channels, spec.height, spec.width, getattr(spec, "normalisation_kind", "global"))
+            if key in prepared:
+                return prepared[key]
+            if spec.channels == 1:
+                if len(payloads) != 1:
+                    raise ValidationError(
+                        "The single-channel pipeline expects exactly one image; received "
+                        f"{len(payloads)}."
+                    )
+                value = self.preprocessing.preprocess_single_channel(
+                    payloads[0][1], payloads[0][0], size=spec.height
                 )
-            preprocessed = self.preprocessing.preprocess_single_channel(
-                payloads[0][1], payloads[0][0], size=primary_spec.height
-            )
-        else:
-            preprocessed = self.preprocessing.preprocess_four_channel(
-                payloads, size=primary_spec.height, modality_names=request.modality_names
-            )
+            else:
+                value = self.preprocessing.preprocess_four_channel(
+                    payloads,
+                    size=spec.height,
+                    modality_names=request.modality_names,
+                    normalisation=(
+                        NORMALISATION_PER_CHANNEL
+                        if getattr(spec, "normalisation_kind", "global") == "per_channel"
+                        else NORMALISATION_GLOBAL
+                    ),
+                )
+            prepared[key] = value
+            return value
+
+        preprocessed = prepared_for(primary_spec)
         preprocessing_artifacts = {}
         for index, (label, array) in enumerate(preprocessed.display_stack):
             path = artifact_root / f"input_{index}_{safe_filename(label.lower())}.png"
@@ -306,7 +487,9 @@ class AnalysisService:
                 }
                 continue
             segmentation = self.segmentation.predict(
-                model_id, preprocessed, threshold=request.threshold
+                model_id,
+                prepared_for(loaded.descriptor.input_spec),
+                threshold=request.threshold,
             )
             member_results[model_id] = segmentation
             probabilities[model_id] = segmentation.probability
@@ -379,6 +562,15 @@ class AnalysisService:
         )
         if request.threshold != 0.5:
             region_measurements["threshold"] = request.threshold
+        stacked_payload = None
+        if request.enable_stacked_ensemble:
+            emit("stacked_ensemble", "Running the notebook's stacked ensemble", 60)
+            stacked_payload = self._run_stacked_ensemble(
+                request,
+                model_ids,
+                member_results,
+                prepared_for(_stacked_input_spec()),
+            )
         radiomics_payload = None
         if request.enable_radiomics:
             emit("radiomics", "Extracting radiomics features", 65)
@@ -442,6 +634,7 @@ class AnalysisService:
             "models": model_payloads,
             "ensemble": ensemble_outcome,
             "uncertainty": uncertainty_payload,
+            "stacked_ensemble": stacked_payload,
             "reference_mask": {
                 "source": mask_source,
                 "model_id": reference_model,

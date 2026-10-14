@@ -137,6 +137,30 @@ def _find_duplicate_channels(
             if np.max(np.abs(sig_a - sig_b)) <= tolerance:
                 duplicates.append((name_a, name_b))
     return duplicates
+def normalise_modalities_per_channel(arrays: Sequence[np.ndarray]) -> np.ndarray:
+    """Per-channel z-score, the normalisation of ``FINAL ENSEMBLE NB.ipynb`` (cell 10).
+
+    ``MRIDataset.__getitem__`` divides each channel by its own mean and standard deviation
+    (``(ch - ch.mean()) / (ch.std() + 1e-6)``).  The company notebook instead normalises the whole
+    four-channel block with one pair of statistics, so the two pipelines are *not* interchangeable
+    and each model group gets its own function.
+    """
+
+    if any(array is None for array in arrays):
+        raise UnsupportedInputError("One or more modality channels could not be read.")
+    channels = []
+    for index, array in enumerate(arrays):
+        values = np.asarray(array, dtype=np.float32)
+        std = float(values.std())
+        if std < 1e-5:
+            raise ValidationError(
+                f"Modality channel {index + 1} has (almost) no intensity variation; the "
+                "per-channel z-score would divide by approximately zero."
+            )
+        channels.append((values - float(values.mean())) / (std + 1e-6))
+    return np.stack(channels, axis=-1)
+
+
 def normalise_modalities(arrays: Sequence[np.ndarray]) -> np.ndarray:
     if any(array is None for array in arrays):
         raise UnsupportedInputError("One or more modality channels could not be read.")
@@ -149,11 +173,17 @@ def normalise_modalities(arrays: Sequence[np.ndarray]) -> np.ndarray:
             "normalisation would divide by approximately zero."
         )
     return (stacked - mean) / std
+#: The two normalisations the two notebooks use, named so a caller never has to guess.
+NORMALISATION_GLOBAL = "global z-score over the (H,W,4) block"
+NORMALISATION_PER_CHANNEL = "per-channel z-score ((x - mean) / (std + 1e-6))"
+
+
 def preprocess_four_channel(
     payloads: Sequence[tuple[str, bytes]],
     *,
     size: int = 256,
     modality_names: Sequence[str] | None = None,
+    normalisation: str = NORMALISATION_GLOBAL,
 ) -> PreprocessedInput:
     if payloads is None or len(payloads) == 0:
         raise ValidationError("No four-channel input was provided.")
@@ -207,7 +237,15 @@ def preprocess_four_channel(
         resized = resize_array(np.asarray(array, dtype=np.float32), (size, size), nearest=False)
         resized_stack.append(resized)
         display_stack.append((name.upper(), resized))
-    normalised = normalise_modalities(resized_stack)
+    if normalisation == NORMALISATION_PER_CHANNEL:
+        normalised = normalise_modalities_per_channel(resized_stack)
+    elif normalisation == NORMALISATION_GLOBAL:
+        normalised = normalise_modalities(resized_stack)
+    else:  # pragma: no cover - guarded by the API layer
+        raise ValidationError(
+            f"Unknown normalisation '{normalisation}'. Use one of: "
+            f"{NORMALISATION_GLOBAL!r} or {NORMALISATION_PER_CHANNEL!r}."
+        )
     chw = np.transpose(normalised, (2, 0, 1)).astype(np.float32)
     if chw.shape[0] != 4:
         raise ValidationError(f"Expected 4 channels after preprocessing, obtained {chw.shape[0]}.")
@@ -220,6 +258,7 @@ def preprocess_four_channel(
             warnings.append(f"Channel '{name}' has no intensity variation.")
     metadata = {
         "modalities": [str(n).upper() for n in names],
+        "normalisation": normalisation,
         "channel_statistics": source_stats,
         "global_mean": float(normalised.mean()),
         "global_std": float(normalised.std()),
@@ -227,11 +266,14 @@ def preprocess_four_channel(
     }
     return PreprocessedInput(
         tensor=tensor,
-        pipeline="four_channel_256",
+        # The pipeline name carries the real spatial size: the same service produces 256x256 for
+        # the company checkpoints and 240x240 for the ensemble notebook's models, and a summary
+        # that said "256" while handing out 240x240 tensors would be wrong.
+        pipeline=f"four_channel_{size}",
         channels=4,
         height=size,
         width=size,
-        normalisation="global z-score over the (H,W,4) block (notebook cell 27), bilinear resize",
+        normalisation=f"{normalisation}, bilinear resize",
         display_stack=display_stack,
         metadata=metadata,
     )

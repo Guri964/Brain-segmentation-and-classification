@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 from pathlib import Path
+from typing import Sequence
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 BACKEND_DIR = BASE_DIR / "backend"
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -87,6 +88,31 @@ def artifact_path(filename: str) -> Path:
     return resolve_artifact(filename) or (weights_directory() / filename)
 
 
+def first_existing_artifact(names: Sequence[str]) -> Path:
+    """Resolve the first of several acceptable file names for one artefact.
+
+    The ensemble notebook writes the same model under slightly different names depending on the
+    run (``unet_best.pth`` while training, ``unet.pth`` when saving at the end).  Rather than
+    fail on a name, every accepted spelling is searched in the same order and the winner is
+    recorded, so a status report always says **which** file was used.
+    """
+
+    for name in names:
+        resolved = resolve_artifact(name)
+        if resolved is not None:
+            return resolved
+    return artifact_path(names[0])
+
+
+def artifact_name_used(names: Sequence[str]) -> str | None:
+    """The accepted spelling that exists, or ``None`` when none of them does."""
+
+    for name in names:
+        if resolve_artifact(name) is not None:
+            return name
+    return None
+
+
 def artifact_status(filename: str, *, expected: str = "") -> dict:
     """A serialisable description of where an artefact is looked for and whether it is there."""
 
@@ -124,7 +150,37 @@ class BaseConfig:
     ENABLE_TTA_BY_DEFAULT = _env_bool("BRAIN_ENABLE_TTA", False)
     MC_DROPOUT_SAMPLES = _env_int("BRAIN_MC_DROPOUT_SAMPLES", 8)
     SEGMENTATION_THRESHOLD = _env_float("BRAIN_SEG_THRESHOLD", 0.5)
+    # ------------------------------------------------------------------ ensemble notebook
+    # ``FINAL ENSEMBLE NB.ipynb`` writes these names into its artefacts ZIP.  Each entry lists
+    # every accepted spelling, in priority order, so a slightly different name from a later run
+    # is still found - and the status report names the file that was actually used.
+    ENSEMBLE_ENSEMBLE_ARTIFACTS = {
+        "segnet": ("segnet.pth", "segnet_best.pt"),
+        "unet": ("unet_best.pth", "unet.pth", "unet_ensemble.pth"),
+        "raunet": ("raunet.pth",),
+        "radiomics_cnn": ("radiomics_cnn.pth",),
+        "radiomics_scaler": ("radiomics_scaler.pkl", "radiomics_scaler.joblib"),
+        "radiomics_features": ("radiomics_feature_names.csv", "radiomics_features.csv"),
+        "meta_learner": ("meta_learner.pkl", "meta_learner.joblib"),
+        "meta_scaler": ("meta_scaler.pkl", "meta_scaler.joblib"),
+    }
     MODEL_PATHS = {
+        "segnet_ensemble_240": os.environ.get(
+            "BRAIN_MODEL_ENSEMBLE_SEGNET",
+            str(first_existing_artifact(ENSEMBLE_ENSEMBLE_ARTIFACTS["segnet"])),
+        ),
+        "unet_ensemble_240": os.environ.get(
+            "BRAIN_MODEL_ENSEMBLE_UNET",
+            str(first_existing_artifact(ENSEMBLE_ENSEMBLE_ARTIFACTS["unet"])),
+        ),
+        "raunet_ensemble_240": os.environ.get(
+            "BRAIN_MODEL_ENSEMBLE_RAUNET",
+            str(first_existing_artifact(ENSEMBLE_ENSEMBLE_ARTIFACTS["raunet"])),
+        ),
+        "radiomics_ensemble_cnn": os.environ.get(
+            "BRAIN_MODEL_ENSEMBLE_RADIOMICS_CNN",
+            str(first_existing_artifact(ENSEMBLE_ENSEMBLE_ARTIFACTS["radiomics_cnn"])),
+        ),
         "segnet_brats_4ch": os.environ.get(
             "BRAIN_MODEL_SEGNET", str(artifact_path("segnet_model.pth"))
         ),
@@ -142,6 +198,25 @@ class BaseConfig:
             "BRAIN_MODEL_XCEPTION", str(artifact_path("brain_tumor_xception_final.keras"))
         ),
     }
+    # The scaler and the feature schema travel with the radiomics CNN; the meta-learner and its
+    # scaler are the stacked ensemble's head.  They are separate files, so each one is resolved
+    # and reported on its own instead of failing as one opaque "ensemble" blob.
+    RADIOMICS_ENSEMBLE_SCALER_PATH = os.environ.get(
+        "BRAIN_ENSEMBLE_RADIOMICS_SCALER",
+        str(first_existing_artifact(ENSEMBLE_ENSEMBLE_ARTIFACTS["radiomics_scaler"])),
+    )
+    RADIOMICS_ENSEMBLE_SCHEMA_PATH = os.environ.get(
+        "BRAIN_ENSEMBLE_RADIOMICS_SCHEMA",
+        str(first_existing_artifact(ENSEMBLE_ENSEMBLE_ARTIFACTS["radiomics_features"])),
+    )
+    META_LEARNER_PATH = os.environ.get(
+        "BRAIN_ENSEMBLE_META_LEARNER",
+        str(first_existing_artifact(ENSEMBLE_ENSEMBLE_ARTIFACTS["meta_learner"])),
+    )
+    META_SCALER_PATH = os.environ.get(
+        "BRAIN_ENSEMBLE_META_SCALER",
+        str(first_existing_artifact(ENSEMBLE_ENSEMBLE_ARTIFACTS["meta_scaler"])),
+    )
     ENSEMBLE_CALIBRATION_PATH = os.environ.get(
         "BRAIN_ENSEMBLE_CALIBRATION",
         str(BASE_DIR / "data" / "models" / "ensemble_calibration.json"),
@@ -188,6 +263,13 @@ class BaseConfig:
             "env": cls.ENV_NAME,
             "device_preference": cls.DEVICE_PREFERENCE,
             "model_paths": cls.MODEL_PATHS,
+            "ensemble_artifacts": {
+                "radiomics_cnn": cls.MODEL_PATHS["radiomics_ensemble_cnn"],
+                "radiomics_scaler": cls.RADIOMICS_ENSEMBLE_SCALER_PATH,
+                "radiomics_features": cls.RADIOMICS_ENSEMBLE_SCHEMA_PATH,
+                "meta_learner": cls.META_LEARNER_PATH,
+                "meta_scaler": cls.META_SCALER_PATH,
+            },
             "radiomics_backend": cls.RADIOMICS_BACKEND,
             "max_upload_bytes": cls.MAX_CONTENT_LENGTH,
             "assistant_llm_enabled": cls.ASSISTANT_LLM_ENABLED,

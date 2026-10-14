@@ -23,6 +23,8 @@ Checkpoint formats handled
 
 from __future__ import annotations
 
+import importlib.util
+
 import logging
 import time
 from dataclasses import asdict, dataclass, field
@@ -36,6 +38,13 @@ import torch.nn as nn
 from ..utils.io import utc_now
 from .architectures.attention_unet import RAUNet, RAUNetConfig, build_raunet
 from .architectures.dynamic_unet import DEFAULT_FILTERS, DynamicUNet
+from .architectures.notebook_ensemble import (
+    MONAI_UNET_CONFIG,
+    NotebookRAUNet,
+    NotebookRadiomicsCNN,
+    NotebookSegNet,
+    build_monai_unet,
+)
 from .architectures.segnet import SegNet
 
 logger = logging.getLogger(__name__)
@@ -51,6 +60,10 @@ class InputSpec:
     width: int
     normalisation: str
     dtype: str = "float32"
+    #: ``global`` (one mean/std for the whole four-channel block, the company notebook) or
+    #: ``per_channel`` (one mean/std per channel, FINAL ENSEMBLE NB.ipynb).  The two produce
+    #: different tensors from the same files, so the preprocessor must not guess.
+    normalisation_kind: str = "global"
 
     @property
     def is_single_channel(self) -> bool:
@@ -78,6 +91,11 @@ class ModelDescriptor:
     expected_feature_names: list[str] | None = None
     requires_feature_schema: bool = False
     status_override: str | None = None
+    #: Importable module the checkpoints needs; ``None`` when torch is enough.  Reported as
+    #: ``dependency_missing`` instead of ``error`` when it is absent, because the checkpoint is
+    #: not wrong - the environment is incomplete.
+    dependency: str | None = None
+    dependency_hint: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -94,6 +112,8 @@ class ModelDescriptor:
             "supports_mc_dropout": self.supports_mc_dropout,
             "provenance": self.provenance,
             "requires_feature_schema": self.requires_feature_schema,
+            "dependency": self.dependency,
+            "dependency_hint": self.dependency_hint,
         }
 
 
@@ -409,6 +429,93 @@ class ModelRegistry:
             provenance="implemented in backend/app/ml/architectures/attention_unet.py",
         )
 
+        # ---------------------------------------------------------------- FINAL ENSEMBLE NB
+        # These three checkpoints come from the supplied ensemble notebook and were trained on
+        # 240 x 240 four-channel BraTS slices with a per-channel z-score.  They are registered
+        # as separate models because they take a different tensor from the models above: the
+        # registry must never average across two different input contracts.
+        self._descriptors["segnet_ensemble_240"] = ModelDescriptor(
+            model_id="segnet_ensemble_240",
+            display_name="SegNet (ensemble notebook, BraTS 4-channel 240px)",
+            task="segmentation",
+            architecture=(
+                "NotebookSegNet: Conv(4->64)-BN-ReLU-MaxPool-Conv(64->128)-BN-ReLU-MaxPool, "
+                "bilinear decoder, no skip connections"
+            ),
+            path=paths["segnet_ensemble_240"],
+            input_spec=InputSpec(
+                channels=4,
+                height=240,
+                width=240,
+                normalisation="per-channel z-score ((x - mean) / (std + 1e-6)) on float32 slices",
+                normalisation_kind="per_channel",
+            ),
+            output_semantics="logit",
+            trainer="FINAL ENSEMBLE NB.ipynb, cells 11/15/18 (train_model + torch.save)",
+            builder=lambda: NotebookSegNet(in_ch=4, out_ch=1),
+            description=(
+                "The notebook's own SegNet, trained for 30 epochs.  It emits logits; the sigmoid "
+                "is applied by the inference service, exactly as the notebook's dice_score does."
+            ),
+            provenance="FINAL ENSEMBLE NB.ipynb, cells 11/18",
+        )
+
+        self._descriptors["unet_ensemble_240"] = ModelDescriptor(
+            model_id="unet_ensemble_240",
+            display_name="U-Net (MONAI, ensemble notebook, BraTS 4-channel 240px)",
+            task="segmentation",
+            architecture=(
+                "monai.nets.UNet(spatial_dims=2, channels=(32,64,128,256), strides=(2,2,2), "
+                "num_res_units=2, dropout=0.1)"
+            ),
+            path=paths["unet_ensemble_240"],
+            input_spec=InputSpec(
+                channels=4,
+                height=240,
+                width=240,
+                normalisation="per-channel z-score ((x - mean) / (std + 1e-6)) on float32 slices",
+                normalisation_kind="per_channel",
+            ),
+            output_semantics="logit",
+            trainer="FINAL ENSEMBLE NB.ipynb, cells 12/20/21 (30 + 40 epochs)",
+            builder=build_monai_unet,
+            dependency="monai",
+            dependency_hint="Install it with 'pip install monai'.",
+            description=(
+                "The notebook's U-Net, built by MONAI itself because re-implementing the residual "
+                "units would risk a silent key mismatch.  Best validation Dice in the notebook's "
+                "own log: 0.8235 on 300 validation slices."
+            ),
+            provenance="FINAL ENSEMBLE NB.ipynb, cells 12/20/21",
+        )
+
+        self._descriptors["raunet_ensemble_240"] = ModelDescriptor(
+            model_id="raunet_ensemble_240",
+            display_name="RAUNet (attention, ensemble notebook, BraTS 4-channel 240px)",
+            task="segmentation",
+            architecture=(
+                "NotebookRAUNet: 4 encoder stages [32,64,128,256], additive attention gate on "
+                "every skip connection, ConvTranspose + interpolate decoder"
+            ),
+            path=paths["raunet_ensemble_240"],
+            input_spec=InputSpec(
+                channels=4,
+                height=240,
+                width=240,
+                normalisation="per-channel z-score ((x - mean) / (std + 1e-6)) on float32 slices",
+                normalisation_kind="per_channel",
+            ),
+            output_semantics="logit",
+            trainer="FINAL ENSEMBLE NB.ipynb, cells 13/15/22 (30 epochs)",
+            builder=lambda: NotebookRAUNet(in_ch=4, out_ch=1, base=32),
+            description=(
+                "The notebook's attention U-Net (1,994,794 parameters, matching the count the "
+                "notebook printed).  Same input contract as the two models above, so the three "
+                "form the notebook's probability-averaged ensemble."
+            ),
+            provenance="FINAL ENSEMBLE NB.ipynb, cells 13/22",
+        )
+
         self._descriptors["radiomics_mlp_v1"] = ModelDescriptor(
             model_id="radiomics_mlp_v1",
             display_name="Radiomics MLP v1 (incompatible)",
@@ -433,6 +540,36 @@ class ModelRegistry:
                 "classifier is therefore reported as incompatible and stays disabled."
             ),
             provenance="radiomics_cnn_model.pth (notebook cell 40)",
+        )
+
+        # The ensemble notebook's radiomics CNN is a different model with a *known* feature
+        # schema (46 handcrafted features, saved with its scaler), which is exactly what the
+        # legacy checkpoint above is missing.
+        self._descriptors["radiomics_ensemble_cnn"] = ModelDescriptor(
+            model_id="radiomics_ensemble_cnn",
+            display_name="Radiomics CNN 46 features (ensemble notebook)",
+            task="classification",
+            architecture=(
+                "NotebookRadiomicsCNN: Linear(46->256)-BN-ReLU-Dropout(0.3)-Linear(256->128)-"
+                "BN-ReLU-Dropout(0.2)-Linear(128->64)-ReLU-Linear(64->2)"
+            ),
+            path=paths["radiomics_ensemble_cnn"],
+            input_spec=InputSpec(
+                channels=46,
+                height=1,
+                width=1,
+                normalisation="StandardScaler fitted on the notebook's 600 training rows",
+            ),
+            output_semantics="class_logits",
+            trainer="FINAL ENSEMBLE NB.ipynb, cells 26/27",
+            builder=lambda: NotebookRadiomicsCNN(inp=46, n_classes=2),
+            description=(
+                "46 handcrafted per-channel intensity features (11 per channel x 4 channels + "
+                "tumor_size + tumor_ratio), z-scored with the saved scaler.  Served through the "
+                "stacked-ensemble service, which verifies the feature order against the saved "
+                "schema before running anything."
+            ),
+            provenance="FINAL ENSEMBLE NB.ipynb, cells 26/27",
         )
 
     # ------------------------------------------------------------------
@@ -509,9 +646,38 @@ class ModelRegistry:
             self._cache[model_id] = loaded
             return loaded
 
+        if descriptor.dependency and importlib.util.find_spec(descriptor.dependency) is None:
+            loaded = LoadedModel(
+                descriptor=descriptor,
+                module=None,
+                device=self.device,
+                status="dependency_missing",
+                message=(
+                    f"The checkpoint is present but needs the '{descriptor.dependency}' package, "
+                    f"which is not installed. {descriptor.dependency_hint}".strip()
+                ),
+                file_size_bytes=path.stat().st_size,
+            )
+            self._cache[model_id] = loaded
+            return loaded
+
         try:
             state_dict, metadata = load_checkpoint_state(path, self.device)
-            module = descriptor.builder()
+            try:
+                module = descriptor.builder()
+            except RuntimeError as exc:
+                # A builder that reports a missing dependency must not be misreported as an
+                # incompatible checkpoint: the file was never inspected.
+                loaded = LoadedModel(
+                    descriptor=descriptor,
+                    module=None,
+                    device=self.device,
+                    status="dependency_missing",
+                    message=str(exc),
+                    file_size_bytes=path.stat().st_size,
+                )
+                self._cache[model_id] = loaded
+                return loaded
             report = load_into_module(module, state_dict, strict=False)
             if not report["compatible"]:
                 loaded = LoadedModel(
@@ -535,6 +701,12 @@ class ModelRegistry:
                 logger.error("Model %s incompatible: %s", model_id, loaded.message)
                 return loaded
 
+            # The output semantics decide whether a sigmoid is applied before the mask is
+            # thresholded.  Architectures that declare their own keep it; a model built by a
+            # third-party class (MONAI's UNet) takes the descriptor's value, so a logit head can
+            # never be mistaken for a probability head.
+            if not hasattr(module, "output_semantics"):
+                module.output_semantics = descriptor.output_semantics
             module.eval()
             module.to(self.device)
             parameter_count = int(sum(p.numel() for p in module.parameters()))

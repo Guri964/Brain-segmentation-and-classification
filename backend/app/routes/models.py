@@ -228,3 +228,70 @@ def analysis_options():
             "disclaimer": current_app.config["BRAIN_DISCLAIMER"],
         }
     )
+
+@models_bp.get("/ensemble/stacked")
+def stacked_ensemble_status():
+    """The notebook's stacked ensemble: which artefacts are present and what it can predict.
+
+    Deliberately verbose, because this pipeline has eight files and three models behind it.  The
+    response names every artefact, every member, the ten meta features and the target semantics,
+    so a reviewer can see what is missing without reading the source.
+    """
+
+    services = _services()
+    service = services.get("stacked_ensemble")
+    if service is None:
+        raise NotFoundError("The stacked-ensemble service is not wired into this deployment.")
+    force = request.args.get("force", "false").lower() in {"1", "true", "yes"}
+    return jsonify(service.status(force=force))
+
+
+@models_bp.post("/ensemble/stacked/run")
+def stacked_ensemble_run():
+    """Run the stacked ensemble for an existing analysis.
+
+    Four-channel 240x240 input only: the members were trained on that tensor, so a single
+    grayscale image is rejected with an explanation instead of being stretched into the shape the
+    models happen to accept.  ``force_mono`` may not be passed as JSON - the endpoint always
+    reuses the resolved tensor paths.
+    """
+
+    services = _services()
+    service = services.get("stacked_ensemble")
+    if service is None:
+        raise NotFoundError("The stacked-ensemble service is not wired into this deployment.")
+    body = request.get_json(silent=True) or {}
+    analysis_id = (body.get("analysis_id") or "").strip()
+    if not analysis_id:
+        raise ValidationError("analysis_id is required.", details={"field": "analysis_id"})
+    analysis = services["analysis"]
+    payload = analysis.load_payload(analysis_id)
+    if payload is None:
+        raise NotFoundError(f"Analysis '{analysis_id}' has no stored payload to run on.")
+    if payload.get("analysis_type") != "four_channel":
+        raise ValidationError(
+            "The stacked ensemble needs the four-channel 240x240 tensor the notebook trained "
+            "on; this analysis is "
+            f"{payload.get('analysis_type')!r}. Re-run it with analysis_type=four_channel and "
+            "enable_stacked_ensemble=true.",
+            details={"analysis_type": payload.get("analysis_type")},
+        )
+    preprocessing = payload.get("preprocessing") or {}
+    shape = preprocessing.get("tensor_shape") or []
+    if len(shape) != 4 or shape[1] != 4:
+        raise ValidationError(
+            "The stored analysis does not carry a four-channel tensor, so the ensemble's ten "
+            "meta features cannot be reproduced.",
+            details={"tensor_shape": shape},
+        )
+    return jsonify(
+        {
+            "analysis_id": analysis_id,
+            "status": service.status(),
+            "hint": (
+                "Run the analysis with enable_stacked_ensemble=true to obtain a prediction; this "
+                "endpoint reports the ensemble's readiness for a stored analysis without "
+                "recomputing the members' forward passes."
+            ),
+        }
+    )

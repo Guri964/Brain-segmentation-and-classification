@@ -101,10 +101,21 @@ def test_model_paths_all_resolve_through_the_central_helper(fake_project):
         "raunet_brats_4ch",
         "radiomics_mlp_v1",
         "brain_tumor_xception",
+        # the notebook ensemble's three members and its radiomics head
+        "segnet_ensemble_240",
+        "unet_ensemble_240",
+        "raunet_ensemble_240",
+        "radiomics_ensemble_cnn",
     }
     assert paths["brain_tumor_xception"].endswith("brain_tumor_xception_final.keras")
     assert paths["segnet_brats_4ch"].endswith("segnet_model.pth")
     assert paths["radiomics_mlp_v1"].endswith("radiomics_cnn_model.pth")
+    # the ensemble's files are distinct from the company checkpoints: no name collision at all
+    assert paths["segnet_ensemble_240"].endswith("segnet.pth")
+    assert paths["unet_ensemble_240"].endswith("unet_best.pth")
+    assert paths["raunet_ensemble_240"].endswith("raunet.pth")
+    assert paths["radiomics_ensemble_cnn"].endswith("radiomics_cnn.pth")
+    assert len(set(paths.values())) == len(paths)
     # absolute, so a service never depends on the process working directory
     assert all(Path(value).is_absolute() for value in paths.values())
 

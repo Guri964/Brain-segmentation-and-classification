@@ -12,6 +12,7 @@ from .routes import register_blueprints
 from .services.analysis_service import AnalysisService
 from .services.assistant_service import AssistantService
 from .services.classification_service import ClassificationService
+from .services.ensemble_bundle_service import EnsembleBundleService
 from .services.ensemble_service import EnsembleService
 from .services.evaluation_service import EvaluationService
 from .services.image_classification_service import ImageClassificationService
@@ -81,6 +82,7 @@ def create_app(config_object=None, *, env: str | None = None) -> Flask:
     uncertainty = UncertaintyService(config)
     classification = ClassificationService(config, registry=registry)
     image_classification = ImageClassificationService(config)
+    stacked_ensemble = EnsembleBundleService(config, registry, segmentation)
     evaluation = EvaluationService(registry, config, segmentation=segmentation, ensemble=ensemble)
     report = ReportService(config, repository=repository)
     assistant = AssistantService(config, repository=repository)
@@ -91,6 +93,7 @@ def create_app(config_object=None, *, env: str | None = None) -> Flask:
         preprocessing=preprocessing,
         segmentation=segmentation,
         ensemble=ensemble,
+        stacked_ensemble=stacked_ensemble,
         radiomics=radiomics,
         explainability=explainability,
         uncertainty=uncertainty,
@@ -111,6 +114,7 @@ def create_app(config_object=None, *, env: str | None = None) -> Flask:
         "uncertainty": uncertainty,
         "classification": classification,
         "image_classification": image_classification,
+        "stacked_ensemble": stacked_ensemble,
         "evaluation": evaluation,
         "report": report,
         "assistant": assistant,

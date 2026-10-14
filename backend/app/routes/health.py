@@ -47,6 +47,28 @@ def capabilities():
     radiomics = services["radiomics"]
     assistant = services["assistant"]
     model_health = health_service.summary()
+    stacked = services.get("stacked_ensemble")
+    stacked_status = stacked.status() if stacked is not None else None
+    # The capabilities payload stays compact: the full artefact table lives on
+    # GET /api/ensemble/stacked, which is where a reviewer checks a missing file.
+    stacked_summary = (
+        {
+            "available": stacked_status["available"],
+            "state": stacked_status["state"],
+            "reason": stacked_status["reason"],
+            "members": [
+                {"model_id": m["model_id"], "status": m["status"]} for m in stacked_status["members"]
+            ],
+            "missing_artifacts": [
+                a["file"] for a in stacked_status["artifacts"] if not a["present"]
+            ],
+            "target_semantics": stacked_status["target_semantics"],
+            "reported_metrics": stacked_status["reported_metrics"],
+            "metrics_provenance": stacked_status["metrics_provenance"],
+        }
+        if stacked_status
+        else None
+    )
     return jsonify(
         {
             "models": registry.status_report(),
@@ -55,6 +77,7 @@ def capabilities():
             "radiomics": radiomics.backend_status(),
             "classification": classification.status(),
             "image_classification": services["image_classification"].summary(),
+            "stacked_ensemble": stacked_summary,
             "assistant": assistant.status(),
             "explainability": services["explainability"].available_methods(),
             "evaluation": services["evaluation"].stored_results()["state"],

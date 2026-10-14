@@ -62,6 +62,7 @@ def plan():
             enable_explainability=bool(body.get("enable_explainability", True)),
             ensemble_strategy=body.get("ensemble_strategy", "equal"),
             radiomics_mask=body.get("radiomics_mask", "best"),
+            enable_stacked_ensemble=bool(body.get("enable_stacked_ensemble", False)),
         )
     )
     return jsonify(plan_payload)
@@ -96,6 +97,7 @@ def create_analysis():
         radiomics_mask=form.get("radiomics_mask", "best"),
         modality_names=modality_names,
         spacing=spacing,
+        enable_stacked_ensemble=_as_bool(form.get("enable_stacked_ensemble"), False),
     )
     services = _services()
     result = services["analysis"].run(request_object)
