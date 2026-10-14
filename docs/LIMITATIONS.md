@@ -80,7 +80,21 @@ platform reports that rather than presenting a blank image as an explanation.
 Probability fusion is only defined between models that consume the same tensor:
 identical channel count, resolution and normalisation. A 4×256×256 model and a
 1×512×512 model cannot be averaged, and the platform refuses instead of resizing one
-into the other. Consequently, this deployment cannot build an ensemble.
+into the other. Consequently the shipped four-channel checkpoint cannot be averaged with
+anything, and the notebook ensemble's three members (4×240×240, per-channel z-score) never
+enter the same group as the 4×256×256 or 1×512×512 checkpoints: the compatibility endpoint
+groups by `(channels, height, width, normalisation)` and reports the groups it could not fuse.
+
+Two ensembles exist and they are different things:
+
+* the **probability ensemble** (`/api/analysis`, `enable_ensemble`) averages the sigmoid
+  outputs of models that share an input contract. It needs at least two compatible models,
+  which this deployment does not have, so it reports the reason instead of a fused mask;
+* the **stacked ensemble** (`enable_stacked_ensemble`, `GET /api/ensemble/stacked`) is
+  `FINAL ENSEMBLE NB.ipynb`'s own learner: three segmentation members' statistics plus a
+  radiomics CNN feed a `GradientBoostingClassifier`. It is not a probability average and it
+  is not a second opinion on the segmentation. Sections 18-21 describe what it can and
+  cannot support.
 
 ## 11. Weights are only as good as the data behind them
 
@@ -159,7 +173,65 @@ model card, the classification page, the PDF report) carries the provenance sent
 The values are also class-imbalanced averages of a specific split; they say nothing about
 performance on another scanner, another protocol or another population.
 
-## 18. Not a medical device
+## 18. The notebook ensemble's target is a mask-size proxy, not a grade
+
+`FINAL ENSEMBLE NB.ipynb` builds its label as `(mask pixel count > 100)`
+(`labels = (np.array([m.sum() for m in masks]) > 100).astype(int)`) on slices whose ground-truth
+mask already has at least 50 positive pixels. That is an **image-level tumour-size proxy**. The
+`Grade` column of `meta_data.csv` is never used to train it; only the notebook's final report
+*prints* the two classes under the names `LGG`/`HGG`. The deployment therefore serves the labels
+`small_lesion_proxy` / `large_lesion_proxy` and attaches the notebook's own semantics string to
+every payload. It is **not** a WHO grade, not a malignancy verdict, not a tumour type, and it is
+never combined with — or substituted for — the BraTS HGG/LGG grade classifier or the four-class
+Xception tumour-type model. Those are three different tasks with three different label spaces.
+
+## 19. The notebook ensemble's reported accuracy is an upper bound, and it is not ours
+
+Its own run printed `stacked_ensemble_test_accuracy 0.9633` / validation `0.9733`. Two structural
+properties of that run inflate it, and both are reported with every prediction:
+
+1. **Target leakage.** The label comes from the ground-truth mask while the meta-features include
+   each member's maximum and mean *predicted* probability — statistics of the very same mask. The
+   target is partly reconstructible from the inputs;
+2. **Split leakage.** The 70/15/15 split is over *slices*, not patients, so near-duplicate slices of
+   one case appear on both sides of it.
+
+The split, the masks and the radiologist labels are not shipped with the weights, so this
+deployment cannot re-measure those numbers. They are displayed as the training run's record, with
+the provenance sentence, and are never restated as the performance of this deployment. **No
+accuracy improvement over the members is claimed here**, because no held-out evaluation was
+performed to support one.
+
+## 20. Two slots of the notebook's meta-matrix are filled differently at serving time
+
+Both are stated in every payload:
+
+* **Dice.** The notebook computed each member's Dice against the ground-truth mask. No ground truth
+  exists for an uploaded scan, so each member's Dice slot holds its Dice against the ensemble's own
+  consensus mask (`dice_reference: "ensemble consensus"`). The number is not the notebook's number
+  and cannot be compared with it;
+* **Feature mask.** The 46 radiomics features come from that same consensus mask instead of a
+  ground-truth mask, so the radiomics branch — and therefore the meta-learner — is conditioned on
+  predicted masks. On a scan where all three members fail, the consensus is empty and the pipeline
+  stops with the reason instead of inventing a feature vector.
+
+Nothing else is substituted. The ten meta columns are reproduced in the notebook's order, the
+feature names/order come from the saved schema (never re-derived), and a mismatch in any artefact
+width is reported as `incompatible` rather than worked around.
+
+## 21. The stacked ensemble needs all eight artefacts and MONAI
+
+`segnet.pth`, `unet_best.pth`, `raunet.pth`, `radiomics_cnn.pth`, `radiomics_scaler.pkl`,
+`radiomics_feature_names.csv`, `meta_scaler.pkl` and `meta_learner.pkl` must all be present in
+`models/weights/`. The second member was built by the notebook with `monai.nets.UNet`, so **MONAI**
+must be installed in the API environment; without it that member reports `dependency_missing`. A
+missing member is never zero-filled: the meta-learner was fitted on a fixed ten-column matrix, and
+imputing a column would feed it a distribution it never saw. The record of the notebook's
+`SegNet accuracy 28.00 / UNet 75.67 / RAUNet 67.67` row is likewise the run's own record — in that
+table the value is the member's Dice, not a classification accuracy, which is exactly the kind of
+misreading the provenance strings exist to prevent.
+
+## 22. Not a medical device
 
 No part of this software has been reviewed, cleared or approved as a medical device.
 It is a research prototype. Outputs are AI-generated and are not intended to replace

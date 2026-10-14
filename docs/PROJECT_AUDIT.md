@@ -294,9 +294,78 @@ accuracy, and no accuracy number is produced by it.
 | `UNet-[16, 32, 64, 128, 256].pt` | **loads and runs** | 46 tensors, 1,940,945 parameters, forward pass on `1 x 1 x 512 x 512` returns probabilities in `[0.0000, 0.0080]` (sigmoid inside the network) |
 | `brain_tumor_xception_final.keras` + `metadata.json` | **absent** | reported as `checkpoint_missing` with the directory to install into; serving path verified separately with a stand-in of the same contract |
 | `radiomics_cnn_model.pth` | **present, not usable** | first layer is `Linear(21 -> 128)`; the feature table in the repository has 11 columns, no scaler, no column order and no label map were saved with it. Reported as incompatible; never fed a padded vector |
-| MONAI U-Net (`best_u-net_model*.pth`) | **absent** | the notebook's MONAI member was never exported; the shipped `.pt` is the 1-channel Dynamic U-Net, a different model with a different input contract |
-| `raunet_brats_4ch.pt` | **absent** | produced by `scripts/train_unet.py`; until then no second four-channel member exists |
-| Ensemble | **not formable in this deployment** | the two present checkpoints take different tensors (`4x256x256` z-scored vs `1x512x512` in `[0, 1]`); `/api/ensemble/compatibility` explains this and refuses to fuse across contracts |
+| MONAI U-Net | **served as a member of the stacked ensemble** | registered as `unet_ensemble_240` (1,604,024 parameters) for `unet_best.pth`; needs MONAI installed and is reported as `dependency_missing` without it. The shipped `UNet-[...].pt` is a *different* model (1-channel Dynamic U-Net) and is unchanged |
+| `raunet_brats_4ch.pt` | **absent** | produced by `scripts/train_unet.py`; this is the company RAUNet, unrelated to the notebook's `raunet.pth` member |
+| Probability ensemble | **not formable in this deployment** | the two present company checkpoints take different tensors (`4x256x256` z-scored vs `1x512x512` in `[0, 1]`); `/api/ensemble/compatibility` explains this and refuses to fuse across contracts |
+| Stacked ensemble (`FINAL ENSEMBLE NB.ipynb`) | **served; artefacts absent** | eight files, all in `models/weights/`; with them installed the audit executes the full pipeline on a synthetic slice (three members → consensus → 46 features → 10 meta features → label). Without them it reports `artifacts_missing` and names each file. See §10.1-10.2 |
 
 Radiomics extraction was verified by executing it: the native backend produces **68 features**
 (diagnostics 17, first-order 19, GLCM 10, GLRLM 9, shape 13) on a synthetic region.
+
+### 10.1 The two notebooks, read end to end
+
+Both supplied notebooks were read in full before anything was changed, because models from
+different notebooks are not automatically compatible.
+
+| | `firstnb.ipynb` | `FINAL ENSEMBLE NB.ipynb` |
+| --- | --- | --- |
+| Task | Tumour **type**, four classes (glioma / meningioma / pituitary / no tumour) | The notebook's own label `(mask pixel count > 100)` on BraTS 2020 slices |
+| Input | RGB 299×299×3, `x / 127.5 - 1` | Four channels (T1, T1ce, T2, FLAIR), 240×240, per-channel z-score |
+| Output | Softmax over four classes | `GradientBoostingClassifier` over ten meta features |
+| Artefacts | `brain_tumor_xception_final.keras` + `metadata.json` | `segnet.pth`, `unet_best.pth`, `raunet.pth`, `radiomics_cnn.pth`, `radiomics_scaler.pkl`, `radiomics_feature_names.csv`, `meta_scaler.pkl`, `meta_learner.pkl` |
+| In this deployment | Serving path complete; **no artefact installed**, so no class is predicted | Served end to end; **no artefact installed**, so it reports `artifacts_missing` |
+
+Findings that shaped the integration:
+
+1. **The two notebooks share nothing that could be fused.** Different input tensors, different
+   label spaces, different purposes. They are served as separate capabilities and are never
+   combined; the four Xception classes are never derived from a segmentation mask or a binary label.
+2. **The ensemble's target is a mask-size proxy, not a grade.** `labels = (np.array([m.sum() for m
+   in masks]) > 100).astype(int)` restricted to slices whose GT mask already has ≥ 50 pixels. Only
+   the notebook's *report* prints those classes as `LGG`/`HGG`; the `Grade` column is never used for
+   training. The deployment therefore serves `small_lesion_proxy` / `large_lesion_proxy`.
+3. **The meta-learner consumes exactly ten columns** — three members × {Dice, max probability, mean
+   probability} plus the radiomics CNN's label — in the order the notebook built them. That is now a
+   frozen contract, checked at load time against `radiomics_feature_names.csv`, the radiomics scaler,
+   the CNN's first layer, the meta-scaler and the meta-learner's `n_features_in_`.
+4. **Two slots cannot be reproduced from one image.** The notebook filled each member's Dice from the
+   ground-truth mask and extracted the 46 features from the ground-truth mask. At serving time there
+   is no ground truth, so the Dice slot holds the member's Dice against the consensus mask and the
+   features come from that same consensus mask. Both substitutions are printed in every payload
+   (`dice_reference`, `feature_mask_source`) rather than being left implicit.
+5. **The notebook's own numbers are reported, not re-measured.** `stacked_ensemble_test_accuracy
+   0.9633` and friends are what its run printed, on a *slice-level* split of 2,000 slices, with the
+   label derived from the same mask the meta-features summarise. They travel with a provenance
+   sentence and a leakage note; no accuracy improvement is claimed for this deployment, because no
+   held-out evaluation was possible without the data.
+6. **The members are not the shipped checkpoints.** `segnet.pth` shares the architecture of
+   `segnet_model.pth` but not its weights (the root checkpoint's key set differs by 20 missing / 23
+   unexpected tensors), and it is a 4×240×240 model. It is therefore registered as a *separate*
+   model (`segnet_ensemble_240`) and never substituted for the company checkpoint.
+7. **The notebook's own pipeline has loose ends, recorded rather than patched over:** its
+   `meta_X_*` cells recompute a different split and overwrite `y_val`; the report cell references
+   `sn_val` / `un_val` / `ra_val`, which are never defined; the "saved names" list has no `raunet`
+   entry. None of these change the served pipeline, and none is silently "fixed" in the notebook.
+
+### 10.2 The notebook models, verified by execution
+
+`tests/test_final_ensemble.py` (38 tests, torch-only) writes stand-ins with the notebook's real
+architectures and exercises the whole path; `python scripts/audit_integration.py` performs the same
+kind of execution check on the real artefacts once they are installed, including one full
+end-to-end run of the pipeline on a synthetic four-channel slice.
+
+| Check | Result |
+| --- | --- |
+| 46-feature extractor vs SciPy on 200 random regions | max abs difference `1.67e-16` (skew), `1.78e-15` (kurtosis), `0.0` (the rest) |
+| Feature order | identical to the notebook's list, `len(feature_order()) == 46` |
+| Empty mask | returns `None`, exactly like the notebook |
+| Parameter counts | SegNet 151,105 · MONAI U-Net 1,604,024 · RAUNet 1,994,794 · RadiomicsCNN 54,082 |
+| Registry contracts | three members at `1×4×240×240` `per_channel`; the CNN at 46 features; the company models unchanged at `1×4×256×256` / `1×1×512×512` |
+| Refusals | missing artefact → `artifacts_missing`; missing member → `members_missing`; wrong tensor → `ValidationError`; empty consensus → `ModelUnavailableError`; schema/scaler/CNN of different widths → `incompatible` |
+| HTTP path | `POST /api/analysis` with four modalities + `enable_stacked_ensemble=true` → 201, four models completed, `stacked_ensemble.available: true`, 10 meta features, 46 radiomics features; single-channel + the flag → 422 |
+| Determinism | identical prediction and identical feature/scaled digests on repeated runs, and members are reused from the analysis instead of recomputed |
+
+One genuine defect was found and fixed by this pass: the service's standalone `predict()` path (used
+by the audit script and by any caller without precomputed member results) handed a NumPy array to
+the segmentation service, which expects a tensor; `_TensorWrapper` now converts once, and
+`test_a_numpy_slice_is_accepted_when_the_members_have_to_be_run_here` locks it in.

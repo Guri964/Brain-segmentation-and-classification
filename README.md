@@ -29,6 +29,7 @@ placeholder metrics and no fabricated predictions anywhere in this repository.
 | Radiomics feature table | Working: one labelled row per case in the application's own schema | `scripts/extract_radiomics.py` |
 | Tumour classification | Pipeline complete and served; **no artefact installed here**, so no class is predicted | `scripts/train_classification.py`, `backend/app/services/classification_service.py` |
 | Tumour **type** from the image (Keras Xception, four classes) | Serving path complete; the `.keras` checkpoint and its `metadata.json` are not installed in this deployment, so no class is predicted | `backend/app/ml/image_classifier.py`, `POST /api/classification/image` |
+| Stacked ensemble of `FINAL ENSEMBLE NB.ipynb` (three 4×240×240 members + 46-feature radiomics CNN → gradient-boosted head) | Pipeline complete and served end-to-end; **its eight artefacts are not installed here**, so it reports `artifacts_missing` and predicts nothing. Predicts the notebook's mask-size proxy, never a grade | `backend/app/services/ensemble_bundle_service.py`, `backend/app/ml/radiomics_notebook.py`, `GET /api/ensemble/stacked` |
 | SQLite persistence + history + search | Working | `backend/app/database/` |
 | PDF report (14 sections) | Working | `backend/app/services/report_service.py` |
 | Model evaluation module | Working; reports "Not evaluated" until the test split has been run | `backend/app/services/evaluation_service.py`, `scripts/evaluate_models.py` |
@@ -60,7 +61,9 @@ cd frontend && npm run dev       # http://localhost:5173, proxies /api to :5000
 
 Model weights are **not** in this repository. Put them in `models/weights/` (or point
 `BRAIN_WEIGHTS_DIR` elsewhere) - see [models/README.md](models/README.md) for the expected file
-names, the input contract of each artefact and the one checkpoint that cannot be served.
+names, the input contract of each artefact and the one checkpoint that cannot be served. The
+notebook's stacked ensemble needs its eight files **together**; [HOW_TO_RUN.md](HOW_TO_RUN.md) §3
+lists them with the exact copy commands for Windows and Linux/macOS.
 
 Full instructions, including GPU setup and dataset preparation, are in
 [HOW_TO_RUN.md](HOW_TO_RUN.md).

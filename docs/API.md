@@ -55,6 +55,11 @@ availability panel from this response.
   "ensemble": { "available": false, "groups": [ { "channels": 1, "height": 512, "width": 512, "members": ["unet_dynamic_512"], "ensemblable": false } ], "reasons": ["…"] },
   "radiomics": { "selected_backend": "native", "pyradiomics_available": false, "note": "…" },
   "classification": { "available": false, "reason": "…", "requirements": ["…"] },
+  "image_classification": { "available": false, "state": "checkpoint_missing", "model_id": "brain_tumor_xception", "classes": ["glioma","meningioma","pituitary","notumor"], "reported_metrics": null, "metrics_provenance": "…" },
+  "stacked_ensemble": { "available": false, "state": "artifacts_missing", "reason": "The stacked ensemble needs all of its artefacts; missing: radiomics_cnn.pth, …",
+                        "members": [ { "model_id": "segnet_ensemble_240", "status": "missing" } ],
+                        "missing_artifacts": ["radiomics_cnn.pth", "radiomics_scaler.pkl", "radiomics_feature_names.csv", "meta_scaler.pkl", "meta_learner.pkl"],
+                        "target_semantics": "…", "reported_metrics": { "stacked_ensemble_test_accuracy": 0.9633, … }, "metrics_provenance": "…" },
   "assistant": { "backend": "local", "note": "…", "suggested_questions": ["…"] },
   "explainability": { "segmentation": [ { "model_id": "…", "available": true, "method": "grad_cam", "target_layer": "conv9_2" } ], "classification": {...}, "disclaimer": "…" },
   "evaluation": "not_evaluated",
@@ -86,6 +91,7 @@ The pipelines, model choices and defaults the analysis form should offer.
 | `enable_explainability` | no | Default `true` |
 | `enable_uncertainty` | no | Default `false`; costs extra passes |
 | `radiomics_mask` | no | `best`, `primary` or `ensemble` |
+| `enable_stacked_ensemble` | no | `true`/`false`, default `false`. Runs the notebook's stacked ensemble; **four-channel only**, and only when all eight of its artefacts are installed |
 
 Returns **201** with the canonical analysis payload (the same object stored as
 `data/artifacts/<analysis_id>/analysis.json`):
@@ -122,6 +128,7 @@ Returns **201** with the canonical analysis payload (the same object stored as
   "explainability": [ { "model_id": "unet_dynamic_512", "available": true, "method": "grad_cam", "target_layer": "conv9_2", "heatmap_mean": 0.28, "artifacts": { "heatmap": "gradcam_unet_dynamic_512.png", "overlay": "gradcam_overlay_unet_dynamic_512.png" } } ],
   "classification": { "available": false, "reason": "No validated classifier artefact was found in …" },
   "model_comparison": { "state": "unlabelled", "note": "…", "models": [ ... ] },
+  "stacked_ensemble": { ... only when enable_stacked_ensemble was set; see below ... },
   "artifacts_root": "artifacts/an-20261013-e8ccde6b6e",
   "report": { "available": true, "report_id": "an-20261013-e8ccde6b6e-report", "relative_path": "reports/…/…-report.pdf", "size_bytes": 618715, "generator_version": "reportgen-1.0" },
   "disclaimer": "Research prototype. …"
@@ -141,7 +148,63 @@ axis, same order as `roi_bounding_box`) inside `quality`.
 Same body as the analysis request (files excluded). Returns what *would* run, with a
 `runnable` flag, the health verdict and the reason for each step, plus the ensemble
 compatibility, radiomics, explainability, uncertainty and classification availability.
-The dashboard shows this before the user commits to a run.
+The dashboard shows this before the user commits to a run. The body also accepts
+`enable_stacked_ensemble`, and the response carries a matching block:
+
+```json
+"stacked_ensemble": {
+  "requested": true,
+  "runnable": true,
+  "state": "ready",
+  "reason": "All five head artefacts are present and the three segmentation members load; the ten meta features can be reproduced exactly.",
+  "members": [ {"model_id": "segnet_ensemble_240", "available": true, "status": "ready"}, ... ],
+  "input_requirements": { "analysis_type": "four_channel", "channels": 4, "spatial_size": [240,240],
+                          "normalisation": "per-channel z-score over the resized 240x240 slice",
+                          "modality_order": ["t1","t1ce","t2","flair"] },
+  "target_semantics": "The notebook's label vector is (mask pixel count > 100), an image-level tumour-size proxy, not the WHO grade. …"
+}
+```
+
+### The stacked ensemble in the analysis payload
+
+When `enable_stacked_ensemble=true` on a four-channel run, the payload gains one
+`stacked_ensemble` block. It is either a completed result:
+
+```json
+"stacked_ensemble": {
+  "model_id": "stacked_ensemble_brats", "available": true, "state": "completed", "task": "stacked_ensemble",
+  "prediction": 1, "class_labels": ["small_lesion_proxy", "large_lesion_proxy"],
+  "class_probabilities": [0.0616, 0.9384],
+  "meta_features": { "segnet_ensemble_240.dice": 0.5288, "segnet_ensemble_240.max_prob": 0.5551, … , "radiomics_prediction": 0.0 },
+  "meta_features_scaled": [ … 10 values … ], "meta_feature_count": 10,
+  "radiomics": { "feature_count": 46, "scaler": "radiomics_scaler.pkl", "cnn": "radiomics_cnn.pth",
+                 "logits": [...], "probabilities": [...], "score": 4.11e-139, "prediction": 0,
+                 "raw_feature_digest": "…", "scaled_feature_digest": "…", "feature_names_from": "radiomics_feature_names.csv" },
+  "members": [ { "model_id": "segnet_ensemble_240", "reused": true, "threshold": 0.5, "dice_vs_consensus": 0.5288, … }, … ],
+  "member_statistics": [ … ], "consensus": { "threshold": 0.5, "foreground_pixels": 24980, "foreground_fraction": 0.4337,
+                                              "probability_mean": 0.4975, "probability_max": 0.6758 },
+  "dice_reference": "ensemble consensus", "dice_note": "…", "feature_mask_source": "consensus mask of the three members",
+  "target_semantics": "…", "leakage_note": "…", "label_semantics": "…",
+  "reported_metrics": { "stacked_ensemble_test_accuracy": 0.9633, … }, "metrics_provenance": "…",
+  "artifact_digests": { "meta_learner": "0882b18145eb7cdb", … }, "artifact_sizes": { … },
+  "meta_classes": ["0","1"], "inference_seconds": 0.026, "disclaimer": "…" }
+}
+```
+
+or a reported refusal, which never fails the rest of the analysis:
+
+```json
+"stacked_ensemble": { "available": false, "state": "members_missing",
+                      "reasons": ["The meta-learner was fitted on three segmentation members and cannot be fed a different matrix; unavailable: raunet_ensemble_240. …"],
+                      "model_status": { "segnet_ensemble_240": "ready", "raunet_ensemble_240": "missing" } }
+```
+
+`prediction` indexes `class_labels`. Those names are the notebook's own target
+(`mask pixel count > 100`), **not** a WHO grade, a malignancy verdict or a tumour type; the
+`target_semantics`, `leakage_note` and `metrics_provenance` strings travel with every payload and
+the dashboard prints them verbatim. Nothing is imputed: a missing member, a wrong-width scaler or a
+feature schema that is not a permutation of the extractor's 46 names all stop the block with the
+precise reason instead of a number.
 
 ### `GET /api/analysis/<analysis_id>`
 
@@ -182,6 +245,8 @@ rejected with `not_found`.
 | `GET /api/models/<model_id>/health?force=true` | Re-runs the deterministic reference check for one model |
 | `POST /api/models/health-check` `{"force": false}` | Runs the reference check for every model and returns the summary |
 | `POST /api/models/compare` | Runs several models on the same upload in one request and returns each model's probability, mask and overlay as data URLs |
+| `GET /api/ensemble/stacked` | Full status of `FINAL ENSEMBLE NB.ipynb`'s stacked ensemble: every artefact with its path/size/presence, the three members with their state and parameter counts, the input contract, the ten meta-feature names, the verified contracts (46 features, 10 meta features, digests), the target semantics, the leakage note, the metrics the notebook's run printed and the provenance of those numbers |
+| `POST /api/ensemble/stacked/run` `{"analysis_id": "…"}` | Re-runs the notebook's pipeline on a stored four-channel analysis and returns the same block as the single-run endpoint. **422** without an `analysis_id` or when the analysis is not four-channel, **404** for an unknown analysis or one with no stored payload |
 
 A health report contains `verdict` (`responsive`, `no_foreground`, `saturated`,
 `degenerate`, `failed`, `not_loaded`), `responsive`, the per-check numbers

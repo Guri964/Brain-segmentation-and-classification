@@ -275,6 +275,124 @@ def audit_radiomics(config) -> dict:
     }
 
 
+def audit_stacked_ensemble(config) -> dict:
+    """The notebook's stacked ensemble: artefacts, contracts and one real end-to-end run.
+
+    The pipeline is executed on a synthetic four-channel slice, so a successful call proves that
+    all five head artefacts load, that the 46-feature schema matches the scaler and the CNN, that
+    the ten meta features can be built, and that the head returns a label. It proves nothing about
+    accuracy: the notebook's split, masks and labels are not shipped with the weights.
+    """
+
+    import numpy as np
+
+    from app.ml.registry import ModelRegistry
+    from app.services.ensemble_bundle_service import EnsembleBundleService
+    from app.services.segmentation_service import SegmentationService
+
+    registry = ModelRegistry(config)
+    bundle = EnsembleBundleService(
+        config, registry, SegmentationService(registry, config)
+    )
+    status = bundle.status(force=True)
+    entry: dict = {
+        "model_id": "stacked_ensemble_brats",
+        "display_name": "Stacked ensemble (FINAL ENSEMBLE NB.ipynb)",
+        "state": status["state"],
+        "available": status["available"],
+        "reason": status["reason"],
+        "task_description": status["task_description"],
+        "input_requirements": status["input_requirements"],
+        "meta_features": status["meta_features"],
+        "target_semantics": status["target_semantics"],
+        "leakage_note": status["leakage_note"],
+        "reported_metrics": status["reported_metrics"],
+        "metrics_provenance": status["metrics_provenance"],
+        "install_note": status["install_note"],
+        "artifacts": [
+            {
+                "key": artifact["key"],
+                "file": artifact["file"],
+                "role": artifact["role"],
+                "present": artifact["present"],
+                "path": artifact["path"],
+                "bytes": artifact["size_bytes"],
+                "sha256": (
+                    sha256(Path(artifact["path"]))[:16] if artifact["present"] else None
+                ),
+            }
+            for artifact in status["artifacts"]
+        ],
+        "members": [
+            {
+                "model_id": member["model_id"],
+                "status": member["status"],
+                "available": member["available"],
+                "architecture": member["architecture"],
+                "parameter_count": member["parameter_count"],
+                "path": member["path"],
+                "sha256": (
+                    sha256(Path(member["path"]))[:16]
+                    if Path(member["path"]).is_file()
+                    else None
+                ),
+            }
+            for member in status["members"]
+        ],
+    }
+    if not status["available"]:
+        entry["reason_for_no_run"] = (
+            "The pipeline is not executed while an artefact or a member is missing: a partial "
+            "run would have to impute a meta-feature the head was not trained on."
+        )
+        return entry
+    entry["contracts"] = status["contracts"]
+    # A smooth phantom with a bright blob, so the members' consensus mask is not empty. This is
+    # synthetic input: the numbers it produces are execution evidence, never a performance claim.
+    size = 240
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    blob = np.exp(-(((xx - 120.0) ** 2 + (yy - 130.0) ** 2) / (2 * 22.0**2)))
+    tensor = np.zeros((1, 4, size, size), dtype=np.float32)
+    for channel in range(4):
+        ramp = (xx + yy) / (2.0 * size)
+        tensor[0, channel] = (0.4 * ramp + 0.6 * blob) * (1.0 + 0.05 * channel)
+        channel_values = tensor[0, channel]
+        tensor[0, channel] = (channel_values - channel_values.mean()) / (
+            channel_values.std() + 1e-6
+        )
+    try:
+        prediction = bundle.predict(tensor, threshold=0.5)
+        entry["pipeline_run"] = {
+            "input_shape": list(tensor.shape),
+            "note": FORECAST_ONLY,
+            "members": [
+                {
+                    "model_id": member["model_id"],
+                    "max_probability": member["max_probability"],
+                    "mean_probability": member["mean_probability"],
+                    "dice_vs_consensus": member["dice_vs_consensus"],
+                    "reused_from_analysis": member["reused_from_analysis"],
+                }
+                for member in prediction["member_statistics"]
+            ],
+            "consensus": prediction["consensus"],
+            "radiomics_features": prediction["radiomics"]["feature_count"],
+            "radiomics_score": prediction["radiomics"]["score"],
+            "meta_features": prediction["meta_features"],
+            "meta_classes": prediction["meta_classes"],
+            "prediction": prediction["prediction"],
+            "class_labels": prediction["class_labels"],
+            "class_probabilities": prediction["class_probabilities"],
+            "dice_reference": prediction["dice_reference"],
+            "feature_mask_source": prediction["feature_mask_source"],
+            "artifact_digests": prediction["artifact_digests"],
+            "inference_seconds": prediction["inference_seconds"],
+        }
+    except Exception as exc:  # noqa: BLE001 - the audit reports, it never raises
+        entry["pipeline_run"] = {"error": f"{type(exc).__name__}: {exc}"}
+    return entry
+
+
 def audit_frontend() -> dict:
     source = REPO_ROOT / "frontend" / "src"
     dist = REPO_ROOT / "frontend" / "dist"
@@ -303,9 +421,25 @@ def collect(config) -> dict:
         "keras_image_classifier": audit_keras_classifier(config),
         "radiomics_classifier": audit_radiomics_classifier(config),
         "ensemble": audit_ensemble(config),
+        "stacked_ensemble": audit_stacked_ensemble(config),
         "radiomics": audit_radiomics(config),
         "frontend": audit_frontend(),
     }
+
+
+def _wrap(text: str, prefix: str, width: int = 86) -> list[str]:
+    """Wrap a long sentence under a label so the plain-text report stays readable."""
+
+    words = str(text).split()
+    lines: list[str] = []
+    current = prefix
+    for word in words:
+        if len(current) + len(word) + 1 > width and current.strip() != prefix.strip():
+            lines.append(current.rstrip())
+            current = " " * len(prefix)
+        current += word + " "
+    lines.append(current.rstrip())
+    return lines
 
 
 def render(report: dict) -> str:
@@ -410,6 +544,80 @@ def render(report: dict) -> str:
         add(f"  why not      : {reason}")
     add("")
 
+    stacked = report["stacked_ensemble"]
+    add("-" * 90)
+    add("STACKED ENSEMBLE (FINAL ENSEMBLE NB.ipynb)")
+    add("-" * 90)
+    add(f"  state        : {stacked['state']} (available={stacked['available']})")
+    add(f"  reason       : {stacked['reason']}")
+    requirements = stacked.get("input_requirements") or {}
+    if requirements:
+        add(
+            "  input        : "
+            f"{requirements['channels']} x {requirements['spatial_size'][0]} x "
+            f"{requirements['spatial_size'][1]} ({requirements['normalisation']})"
+        )
+        add(f"  modalities   : {', '.join(requirements['modality_order'])}")
+    add("  artefacts    :")
+    for artifact in stacked["artifacts"]:
+        marker = "present" if artifact["present"] else "MISSING"
+        size = f"{artifact['bytes']:,} bytes" if artifact["bytes"] else "-"
+        add(f"    [{marker:7s}] {artifact['file']:32s} {size:>16s}  {artifact['role']}")
+        if artifact["present"]:
+            add(f"               sha256 {artifact['sha256']}...  {artifact['path']}")
+    add("  members      :")
+    for member in stacked["members"]:
+        parameters = (
+            f"{member['parameter_count']:,} params" if member["parameter_count"] else "-"
+        )
+        add(
+            f"    {member['model_id']:22s} {member['status']:16s} {parameters:>18s}  "
+            f"{member['architecture']}"
+        )
+    if stacked.get("contracts"):
+        contracts = stacked["contracts"]
+        add(
+            f"  contracts    : radiomics features={contracts.get('radiomics_features')} "
+            f"meta features={contracts.get('meta_features')} "
+            f"classes={contracts.get('meta_classes')}"
+        )
+    add(f"  meta columns : {', '.join(stacked['meta_features'])}")
+    run = stacked.get("pipeline_run")
+    if run and "error" in run:
+        add(f"  pipeline run : FAILED - {run['error']}")
+    elif run:
+        add(
+            "  pipeline run : OK on a synthetic 4-channel slice "
+            f"input={run['input_shape']} consensus={run['consensus']['foreground_pixels']} px"
+        )
+        for member in run["members"]:
+            add(
+                f"                 {member['model_id']:22s} dice_vs_consensus="
+                f"{member['dice_vs_consensus']:.4f} max_p={member['max_probability']:.4f} "
+                f"mean_p={member['mean_probability']:.4f}"
+            )
+        add(
+            f"                 radiomics {run['radiomics_features']} features -> score "
+            f"{run['radiomics_score']:.6f}"
+        )
+        add(
+            f"                 head prediction={run['prediction']} "
+            f"labels={run['class_labels']} probabilities={run['class_probabilities']}"
+        )
+        add(f"                 {run['note']}")
+    elif stacked.get("reason_for_no_run"):
+        add(f"  pipeline run : not attempted - {stacked['reason_for_no_run']}")
+    for line in _wrap(stacked["target_semantics"], "  target       : "):
+        add(line)
+    for line in _wrap(stacked["leakage_note"], "  leakage      : "):
+        add(line)
+    add(f"  metrics      : {stacked['reported_metrics']}")
+    for line in _wrap(stacked["metrics_provenance"], "                 "):
+        add(line)
+    for line in _wrap(stacked["install_note"], "  install      : "):
+        add(line)
+    add("")
+
     radiomics = report["radiomics"]
     add("-" * 90)
     add("RADIOMICS EXTRACTION")
@@ -459,6 +667,11 @@ def main() -> int:
                 missing.append(entry["model_id"])
         if report["keras_image_classifier"]["state"] == "checkpoint_missing":
             missing.append(report["keras_image_classifier"]["model_id"])
+        # The stacked ensemble is part of the documented deliverable, so --strict counts its
+        # artefacts too: an operator who copied seven of the eight files gets a non-zero exit.
+        for artifact in report["stacked_ensemble"]["artifacts"]:
+            if not artifact["present"]:
+                missing.append(artifact["file"])
         if missing:
             print("missing artefacts: " + ", ".join(missing), file=sys.stderr)
             return 1

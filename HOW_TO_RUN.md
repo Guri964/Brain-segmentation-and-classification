@@ -23,13 +23,19 @@ Check what you ended up with:
 python scripts/setup_env.py
 ```
 
-That report tells you which optional pieces are present. Two of them matter:
+Python 3.11 is what the platform is installed and tested on (3.10–3.12 also work); Node 18+ is
+needed for the frontend build only.
+
+That report tells you which optional pieces are present. Three of them matter:
 
 * **SimpleITK** — required only if you want to feed NIfTI, NRRD or DICOM volumes.
   Without it the platform accepts PNG/JPEG and says so.
 * **PyRadiomics** — has no wheel for Python 3.11+. The bundled native extractor is
   used instead and the API reports `selected_backend: native`; the feature values it
   produces are verified against analytic shapes in `tests/test_radiomics.py`.
+* **MONAI** (`pip install monai`) — needed only for the second member of the notebook's stacked
+  ensemble, which the notebook built with `monai.nets.UNet`. Without it that member is reported
+  as `dependency_missing`, the ensemble does not run, and nothing else changes. See §3.
 
 ### 1.2 Frontend
 
@@ -125,6 +131,56 @@ file names and each one's input contract. `python scripts/audit_integration.py` 
 per artefact, whether it was found, whether it loads and whether a forward pass on the
 documented input succeeds - and names exactly what is missing when it does not.
 
+#### The stacked ensemble of `FINAL ENSEMBLE NB.ipynb`
+
+Eight files have to be present **together**; the meta-learner was fitted on a fixed ten-column
+matrix (three segmentation members × {Dice, max probability, mean probability} + the radiomics
+CNN's label), so a missing member is reported rather than zero-filled. The extracted folder on the
+author's machine is `C:\Users\Tilak Studio\Downloads\brain_mri_ensemble_artifacts`; the
+destination is `PROJECT_ROOT/models/weights/`.
+
+| File in `brain_mri_ensemble_artifacts\` | Role | Destination (repository-relative) |
+|---|---|---|
+| `segnet.pth` | member 1 — `NotebookSegNet`, 151,105 parameters | `models/weights/segnet.pth` |
+| `unet_best.pth` | member 2 — MONAI `UNet`, 1,604,024 parameters | `models/weights/unet_best.pth` |
+| `raunet.pth` | member 3 — `NotebookRAUNet`, 1,994,794 parameters | `models/weights/raunet.pth` |
+| `radiomics_cnn.pth` | 46-feature classifier head, 54,082 parameters | `models/weights/radiomics_cnn.pth` |
+| `radiomics_scaler.pkl` | `StandardScaler` for the 46 features | `models/weights/radiomics_scaler.pkl` |
+| `radiomics_feature_names.csv` | the 46 feature names, in training order | `models/weights/radiomics_feature_names.csv` |
+| `meta_scaler.pkl` | `StandardScaler` for the 10 meta features | `models/weights/meta_scaler.pkl` |
+| `meta_learner.pkl` | `GradientBoostingClassifier` (the stacked head) | `models/weights/meta_learner.pkl` |
+
+`segnet_best.pt` in the same folder is optional — nothing reads it. Copy the table above with:
+
+```powershell
+# Windows PowerShell, from the repository root
+$src = "$HOME\Downloads\brain_mri_ensemble_artifacts"
+$dst = "models\weights"
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+Copy-Item "$src\segnet.pth","$src\unet_best.pth","$src\raunet.pth","$src\radiomics_cnn.pth","$src\radiomics_scaler.pkl","$src\radiomics_feature_names.csv","$src\meta_scaler.pkl","$src\meta_learner.pkl" -Destination $dst
+```
+
+```bash
+# Linux/macOS, from the repository root
+mkdir -p models/weights
+cp "$HOME/Downloads/brain_mri_ensemble_artifacts"/{segnet.pth,unet_best.pth,raunet.pth,radiomics_cnn.pth,radiomics_scaler.pkl,radiomics_feature_names.csv,meta_scaler.pkl,meta_learner.pkl} models/weights/
+```
+
+Then check the install — no restart is needed, the resolver reads the directory per request:
+
+```bash
+python scripts/audit_integration.py            # the STACKED ENSEMBLE section
+curl -s localhost:5000/api/ensemble/stacked | python -m json.tool | head -40
+```
+
+`state: ready` means all eight load and the contracts agree. `state: artifacts_missing`,
+`members_missing` or `incompatible` names the file or the mismatch, and the analysis still runs —
+the stacked section simply reports why it could not.
+
+`unet_best.pth` also needs **MONAI** in the API environment (`pip install monai`); the notebook
+built that member with `monai.nets.UNet`. Without MONAI the member is reported as
+`dependency_missing` and the ensemble does not run — the other models are unaffected.
+
 The four-class image classifier additionally needs TensorFlow in the API environment
 (`pip install tensorflow-cpu`) plus `metadata.json` beside the checkpoint; without either, the
 endpoint answers 409 with the missing file and nothing else on the platform is affected.
@@ -132,7 +188,7 @@ endpoint answers 409 with the missing file and nothing else on the platform is a
 > **Do not run `torch.compile` in the same process as TensorFlow.** Importing TensorFlow and
 > then `torch.compile` (which pulls in `torch._dynamo` → `triton`) crashes the interpreter on
 > some environments, this one included. The API never calls `torch.compile`; the training
-> notebook does, so train and serve in different processes. See `docs/LIMITATIONS.md` §17.
+> notebook does, so train and serve in different processes. See `docs/LIMITATIONS.md` §16.
 
 ---
 
@@ -146,6 +202,44 @@ endpoint answers 409 with the missing file and nothing else on the platform is a
 4. Inspect **Segmentation Results**, **Quantitative Radiomics**, **Explainable AI** and
    **Clinical Decision Support**. Every panel states what it could not compute.
 5. **Reports** → download the PDF for that analysis.
+
+## 4b. API examples
+
+All examples assume the API on `localhost:5000` (add `-F` fields in this order for a four-channel
+run; `t1`, `t1ce`, `t2`, `flair` must be four *different* sequences).
+
+```bash
+# what every model reports about itself, and what is missing
+curl -s localhost:5000/api/capabilities | python -m json.tool | head -60
+curl -s localhost:5000/api/ensemble/stacked | python -m json.tool | head -60
+
+# what a run would do, without running it
+curl -s -X POST localhost:5000/api/analysis/plan \
+  -H 'Content-Type: application/json' \
+  -d '{"analysis_type":"four_channel","model_ids":["segnet_brats_4ch"],
+       "enable_ensemble":true,"enable_radiomics":true,"enable_stacked_ensemble":true}' \
+  | python -m json.tool | sed -n '/stacked_ensemble/,$p'
+
+# the four-channel run itself, with the notebook's stacked ensemble enabled
+curl -s -X POST localhost:5000/api/analysis \
+  -F analysis_type=four_channel -F modalities_confirmed=true \
+  -F model_ids=segnet_brats_4ch -F threshold=0.5 \
+  -F enable_ensemble=true -F enable_radiomics=true -F enable_stacked_ensemble=true \
+  -F scan_identifier=STUDY-001 \
+  -F files=@t1.png -F files=@t1ce.png -F files=@t2.png -F files=@flair.png \
+  | python -m json.tool | sed -n '/"stacked_ensemble"/,$p'
+
+# the stored result (the dashboard reads this)
+curl -s localhost:5000/api/analysis/<analysis_id> | python -m json.tool | sed -n '/"stacked_ensemble"/,$p'
+
+# re-run the stacked head on an analysis that already has the four members
+curl -s -X POST localhost:5000/api/ensemble/stacked/run \
+  -H 'Content-Type: application/json' -d '{"analysis_id":"<analysis_id>"}' | python -m json.tool
+```
+
+`enable_stacked_ensemble` on a `single_channel` upload is refused with 422 and the reason
+(`it cannot run on a single-channel upload`), not silently ignored. On a four-channel run the three
+members are added to the step list automatically — their predictions are the ensemble's own inputs.
 
 ## 5. Working with the real dataset
 
@@ -339,6 +433,10 @@ skips a volume it cannot fit (reported, never silently).
 | "Every panel says Not available" | Open an analysis first (Overview → New MRI Analysis), or select one from History |
 | Upload rejected with `unsupported_input` | Only PNG/JPEG are accepted per file. NIfTI/NRRD/DICOM need SimpleITK and the corresponding pipeline |
 | Upload rejected as duplicate channels | Four-channel analyses need four *different* sequences; the API reports which ones matched |
+| Stacked ensemble says `artifacts_missing` | Copy all eight files into `models/weights/` (table in §3); the reason string names the missing ones |
+| Stacked ensemble says `members_missing` | One of `segnet.pth` / `unet_best.pth` / `raunet.pth` does not load. `unet_best.pth` also needs `pip install monai`; `/api/ensemble/stacked` names the member and its state |
+| Stacked ensemble says `incompatible` | `radiomics_feature_names.csv`, `radiomics_scaler.pkl` and `radiomics_cnn.pth` disagree about the 46 columns; the message says which artefact has which width. Re-copy them as one set |
+| Stacked ensemble `prediction` reads `small_lesion_proxy` / `large_lesion_proxy` | Correct: that is the notebook's own target (`mask pixel count > 100`), not a grade or a tumour type. See `docs/LIMITATIONS.md` |
 | Blank page after `npm run build` | The build output must exist at `frontend/dist`; run the build from inside `frontend/` |
 | Slow inference | Two CPU threads are the default. Raise `BRAIN_TORCH_THREADS`, or use a GPU |
 | Notebook: GPU at 0%, `batch preparation` in seconds | The cache is in the compressed `.npz` layout. See §5.3: rebuild or let cell 9 convert it to the memory-mappable layout |
