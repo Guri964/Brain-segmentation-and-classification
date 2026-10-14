@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-clinical-50 text-clinical-950 antialiased dark:bg-clinical-950 dark:text-clinical-50;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-clinical-400 ring-offset-2 ring-offset-white dark:ring-offset-clinical-950;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-clinical-200/70 bg-white shadow-sm transition-colors dark:border-clinical-800 dark:bg-clinical-900/60;
+  }
+  .card-header {
+    @apply flex items-center justify-between gap-3 border-b border-clinical-100 px-4 py-3 dark:border-clinical-800;
+  }
+  .card-body {
+    @apply p-4;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-clinical-600 text-white hover:bg-clinical-700 active:bg-clinical-800;
+  }
+  .btn-secondary {
+    @apply btn border border-clinical-200 bg-white text-clinical-800 hover:bg-clinical-50
+           dark:border-clinical-700 dark:bg-clinical-900 dark:text-clinical-100 dark:hover:bg-clinical-800;
+  }
+  .btn-ghost {
+    @apply btn text-clinical-700 hover:bg-clinical-100 dark:text-clinical-200 dark:hover:bg-clinical-800;
+  }
+  .btn-danger {
+    @apply btn border border-rose-200 text-rose-700 hover:bg-rose-50 dark:border-rose-900/60 dark:text-rose-300 dark:hover:bg-rose-950/40;
+  }
+  .input {
+    @apply w-full rounded-lg border border-clinical-200 bg-white px-3 py-2 text-sm text-clinical-900 placeholder:text-clinical-400
+           focus:border-clinical-400 focus:ring-1 focus:ring-clinical-400
+           dark:border-clinical-700 dark:bg-clinical-900 dark:text-clinical-50 dark:placeholder:text-clinical-500;
+  }
+  .label {
+    @apply mb-1.5 block text-xs font-medium uppercase tracking-wide text-clinical-500 dark:text-clinical-400;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium;
+  }
+  .badge-neutral {
+    @apply badge bg-clinical-100 text-clinical-700 dark:bg-clinical-800 dark:text-clinical-200;
+  }
+  .badge-teal {
+    @apply badge bg-teal-50 text-teal-700 dark:bg-teal-950/60 dark:text-teal-300;
+  }
+  .badge-amber {
+    @apply badge bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300;
+  }
+  .badge-rose {
+    @apply badge bg-rose-50 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300;
+  }
+  .badge-violet {
+    @apply badge bg-violet-50 text-violet-700 dark:bg-violet-950/60 dark:text-violet-300;
+  }
+  .table-base {
+    @apply w-full border-collapse text-left text-sm;
+  }
+  .table-base th {
+    @apply border-b border-clinical-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-clinical-500 dark:border-clinical-700 dark:text-clinical-400;
+  }
+  .table-base td {
+    @apply border-b border-clinical-100 px-3 py-2 align-top dark:border-clinical-800;
+  }
+  .skeleton {
+    @apply relative overflow-hidden rounded bg-clinical-200/70 dark:bg-clinical-800/70;
+  }
+  .skeleton::after {
+    content: '';
+    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-white/40 to-transparent dark:via-white/10;
+  }
+  .prose-note {
+    @apply text-xs leading-relaxed text-clinical-500 dark:text-clinical-400;
+  }
+}

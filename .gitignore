@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime data: uploads, derived artefacts, reports, databases and checkpoints
+data/uploads/
+data/artifacts/
+data/reports/
+data/models/classification/
+data/models/checkpoints/
+data/models/deep_features.csv
+data/models/evaluation_runs/
+data/models/training/
+data/models/*.json
+data/manifests/
+data/*.db
+data/*.db-journal
+backend/data/
+logs/
+*.log
+
+# Frontend
+node_modules/
+*.tsbuildinfo
+frontend/dist/
+frontend/node_modules/
+.vite/
+
+# Model weights and training artefacts never belong in git: they are large, they are not
+# reproducible from source, and they must be installed locally (see models/README.md).
+# The application never downloads or retrains them on its own; it reports them as missing.
+/models/weights/
+/models/**/*.pth
+/models/**/*.pt
+*.pth
+*.pt
+*.keras
+*.h5
+*.hdf5
+*.ckpt
+*.safetensors
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
