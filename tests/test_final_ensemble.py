@@ -330,6 +330,46 @@ def test_a_monai_checkpoint_without_monai_is_reported_as_a_missing_dependency(no
     assert loaded.module is None
 
 
+def test_a_partial_model_paths_mapping_registers_the_ensemble_as_missing_not_as_a_crash():
+    """Some deployments (and the Kaggle-notebook test) supply only the original four paths.
+
+    The registry must still build every descriptor and report the ensemble's files as absent,
+    because "not installed" is a state the interface is expected to render.
+    """
+
+    from dataclasses import dataclass
+
+    from app.config import DevelopmentConfig
+
+    @dataclass
+    class Partial(DevelopmentConfig):
+        MODEL_PATHS: object = None
+        DEVICE_PREFERENCE: str = "cpu"
+        TORCH_THREADS: int = 2
+        MODEL_CACHE_ENABLED: bool = False
+
+    registry = ModelRegistry(
+        Partial(
+            MODEL_PATHS={
+                "segnet_brats_4ch": "/nowhere/segnet_model.pth",
+                "unet_dynamic_512": "/nowhere/unet.pt",
+                "raunet_brats_4ch": "/nowhere/raunet_brats_4ch.pt",
+                "radiomics_mlp_v1": "/nowhere/radiomics_cnn_model.pth",
+            }
+        )
+    )
+    for model_id, file_name in (
+        ("segnet_ensemble_240", "segnet.pth"),
+        ("unet_ensemble_240", "unet_best.pth"),
+        ("raunet_ensemble_240", "raunet.pth"),
+        ("radiomics_ensemble_cnn", "radiomics_cnn.pth"),
+    ):
+        loaded = registry.load_model(model_id)
+        assert loaded.status == "missing", model_id
+        assert loaded.descriptor.path.endswith(file_name)
+        assert Path(loaded.descriptor.path).parent.name == "weights"
+
+
 def test_notebook_models_are_never_mixed_with_the_company_models_in_one_ensemble(notebook_config):
     from app.services.ensemble_service import EnsembleService
     from app.services.segmentation_service import SegmentationService

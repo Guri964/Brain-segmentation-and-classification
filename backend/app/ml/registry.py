@@ -354,6 +354,21 @@ class ModelRegistry:
     def _register_defaults(self) -> None:
         paths = self.config.MODEL_PATHS
 
+        def artifact_path_for(key: str, file_name: str) -> str:
+            """The configured path for ``key``, or the documented location of ``file_name``.
+
+            Not every deployment (and not every test) populates all of ``MODEL_PATHS``.  A missing
+            entry must read as *not installed, expected here* rather than raising, so the registry
+            falls back to the same resolver the rest of the application uses.
+            """
+
+            configured = paths.get(key)
+            if configured:
+                return str(configured)
+            from ..config import artifact_path
+
+            return str(artifact_path(file_name))
+
         self._descriptors["segnet_brats_4ch"] = ModelDescriptor(
             model_id="segnet_brats_4ch",
             display_name="SegNet (BraTS 4-channel)",
@@ -442,7 +457,7 @@ class ModelRegistry:
                 "NotebookSegNet: Conv(4->64)-BN-ReLU-MaxPool-Conv(64->128)-BN-ReLU-MaxPool, "
                 "bilinear decoder, no skip connections"
             ),
-            path=paths["segnet_ensemble_240"],
+            path=artifact_path_for("segnet_ensemble_240", "segnet.pth"),
             input_spec=InputSpec(
                 channels=4,
                 height=240,
@@ -468,7 +483,7 @@ class ModelRegistry:
                 "monai.nets.UNet(spatial_dims=2, channels=(32,64,128,256), strides=(2,2,2), "
                 "num_res_units=2, dropout=0.1)"
             ),
-            path=paths["unet_ensemble_240"],
+            path=artifact_path_for("unet_ensemble_240", "unet_best.pth"),
             input_spec=InputSpec(
                 channels=4,
                 height=240,
@@ -497,7 +512,7 @@ class ModelRegistry:
                 "NotebookRAUNet: 4 encoder stages [32,64,128,256], additive attention gate on "
                 "every skip connection, ConvTranspose + interpolate decoder"
             ),
-            path=paths["raunet_ensemble_240"],
+            path=artifact_path_for("raunet_ensemble_240", "raunet.pth"),
             input_spec=InputSpec(
                 channels=4,
                 height=240,
@@ -553,7 +568,7 @@ class ModelRegistry:
                 "NotebookRadiomicsCNN: Linear(46->256)-BN-ReLU-Dropout(0.3)-Linear(256->128)-"
                 "BN-ReLU-Dropout(0.2)-Linear(128->64)-ReLU-Linear(64->2)"
             ),
-            path=paths["radiomics_ensemble_cnn"],
+            path=artifact_path_for("radiomics_ensemble_cnn", "radiomics_cnn.pth"),
             input_spec=InputSpec(
                 channels=46,
                 height=1,
